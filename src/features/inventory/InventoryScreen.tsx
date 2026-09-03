@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   History,
+  ImageDown,
   LoaderCircle,
   PackagePlus,
   Printer,
@@ -70,6 +71,8 @@ export function InventoryScreen({
   const [labelCopies, setLabelCopies] = useState("1");
   const [labelPreview, setLabelPreview] = useState("");
   const [printingLabels, setPrintingLabels] = useState(false);
+  const [refreshingImage, setRefreshingImage] = useState<string | null>(null);
+  const [refreshingImages, setRefreshingImages] = useState(false);
   const limit = 50;
   const load = async () => {
     setLoading(true);
@@ -181,6 +184,60 @@ export function InventoryScreen({
       await load();
     } catch (error) {
       onNotice(localizeError(language, error));
+    }
+  }
+  async function refreshImage(product: any) {
+    if (!window.confirm(t("refreshImageConfirm"))) return;
+    setRefreshingImage(product.local_id);
+    try {
+      await window.pos.refreshProductImage({ productLocalId: product.local_id });
+      onNotice(t("productImageRefreshed"));
+      await load();
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    } finally {
+      setRefreshingImage(null);
+    }
+  }
+  async function refreshAllImages() {
+    const eligible = filteredProducts.filter(
+      (product: any) => !product.provisional && product.remote_image_url,
+    );
+    if (!eligible.length) return;
+    if (!window.confirm(t("refreshImagesConfirm"))) return;
+    setRefreshingImages(true);
+    try {
+      let result: { refreshed: number; failed: number; results?: Array<{ error?: string }> };
+      try {
+        result = (await window.pos.refreshProductImages({
+          productLocalIds: eligible.map((product: any) => product.local_id),
+        })) as { refreshed: number; failed: number };
+      } catch (error) {
+        // A renderer reload can briefly precede the Electron main-process restart.
+        // Preserve the bulk action with the long-standing single-image channel.
+        if (!(error instanceof Error) || !error.message.includes("No handler registered")) throw error;
+        const outcomes = await Promise.allSettled(
+          eligible.map((product: any) => window.pos.refreshProductImage({ productLocalId: product.local_id })),
+        );
+        result = {
+          refreshed: outcomes.filter((outcome) => outcome.status === "fulfilled").length,
+          failed: outcomes.filter((outcome) => outcome.status === "rejected").length,
+          results: outcomes.map((outcome) => outcome.status === "rejected" ? { error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason) } : {}),
+        };
+      }
+      const firstError = result.results?.find((outcome) => outcome.error)?.error;
+      const notice = t(firstError ? "productImagesRefreshError" : "productImagesRefreshed")
+        .replace("{refreshed}", String(result.refreshed))
+        .replace("{failed}", String(result.failed))
+        .replace("{error}", firstError || "");
+      onNotice(
+        notice,
+      );
+      await load();
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    } finally {
+      setRefreshingImages(false);
     }
   }
   async function activate(row: any, event: React.FormEvent<HTMLFormElement>) {
@@ -333,6 +390,18 @@ export function InventoryScreen({
         description={description}
         actions={
           <>
+            {tab === "products" && filteredProducts.some((product: any) => !product.provisional && product.remote_image_url) ? (
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => void refreshAllImages()}
+                disabled={refreshingImages}
+                title={t("refreshProductImages")}
+              >
+                {refreshingImages ? <LoaderCircle className="spin" /> : <ImageDown />}
+                {t("refreshProductImages")}
+              </button>
+            ) : null}
             {selectedLabels.size ? (
               <button type="button" className="button secondary" onClick={() => openLabelQueue()}>
                 <Printer />
@@ -373,6 +442,7 @@ export function InventoryScreen({
         <div className="search">
           <Search />
           <input
+            data-keyboard-search
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t("searchInventory")}
@@ -602,6 +672,9 @@ export function InventoryScreen({
                       />
                     </span>
                     <span className="inventory-row-actions">
+                      <button type="button" className="icon-button" title={t("refreshProductImage")} onClick={() => void refreshImage(product)} disabled={refreshingImage === product.local_id || product.provisional || !product.remote_image_url}>
+                        {refreshingImage === product.local_id ? <LoaderCircle className="spin" /> : <ImageDown />}
+                      </button>
                       <button type="button" className="icon-button" title={t("adjustStock")} onClick={() => openAdjustment(product)} disabled={product.inventory_policy !== "TRACKED"}>
                         <SlidersHorizontal />
                       </button>
@@ -930,7 +1003,7 @@ export function InventoryScreen({
               <button type="button" className={adjustmentMode === "SET" ? "active" : ""} onClick={() => setAdjustmentMode("SET")}>{t("setCount")}</button>
             </div>
             <label>{adjustmentMode === "RECEIVE" ? t("quantityToAdd") : adjustmentMode === "REMOVE" ? t("quantityToRemove") : t("countedQuantity")}<input type="number" min="0" step="1" required autoFocus value={adjustmentQuantity} onChange={(event) => setAdjustmentQuantity(event.target.value)} /></label>
-            <label>{t("adjustmentReason")}<select name="reason" required defaultValue={adjustmentMode === "RECEIVE" ? t("supplierDelivery") : adjustmentMode === "REMOVE" ? t("damagedGoods") : t("inventoryCount")}><option>{t("supplierDelivery")}</option><option>{t("damagedGoods")}</option><option>{t("inventoryCount")}</option><option>{t("correction")}</option></select></label>
+            <label>{t("adjustmentReason")}<select key={adjustmentMode} name="reason" required defaultValue={adjustmentMode === "RECEIVE" ? "SUPPLIER_DELIVERY" : adjustmentMode === "REMOVE" ? "DAMAGED_GOODS" : "INVENTORY_COUNT"}><option value="SUPPLIER_DELIVERY">{t("supplierDelivery")}</option><option value="DAMAGED_GOODS">{t("damagedGoods")}</option><option value="INVENTORY_COUNT">{t("inventoryCount")}</option><option value="CORRECTION">{t("correction")}</option></select></label>
             <label>{t("adjustmentNote")}<textarea name="note" /></label>
             <div className="dialog-actions"><button type="button" className="button secondary" disabled={adjusting} onClick={() => setAdjustingProduct(null)}>{t("cancel")}</button><button className="button primary" disabled={adjusting || resultingStock(adjustingProduct.stock, adjustmentMode, Number(adjustmentQuantity || 0)) < 0}>{adjusting ? <LoaderCircle className="spin" /> : <Check />}{adjusting ? t("saving") : t("saveChanges")}</button></div>
           </form>

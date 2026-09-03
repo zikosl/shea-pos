@@ -57,6 +57,72 @@ export function receiptHtml(sale: any, items: any[], settings: PrintSettings) {
   return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;min-height:90mm;padding:4mm;font-size:11px}.receipt header{text-align:center;margin-bottom:3mm}.receipt header img{display:block;max-width:22mm;max-height:16mm;object-fit:contain;margin:0 auto 2mm}.receipt h1{font-size:18px;margin:0}.receipt header p,.meta span{margin:1mm 0;color:#444;font-size:9px;white-space:pre-line}.meta{display:flex;justify-content:space-between;gap:3mm;font-size:9px}.customer{margin-top:2mm}.rule{border-top:1px dashed #111;margin:3mm 0}.item{margin:2.4mm 0}.item-name{display:flex;flex-direction:column}.item small{font-size:8px;color:#444}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:3mm}.totals .row{margin:1.2mm 0}.grand{padding-top:2mm;margin-top:2mm!important;border-top:1px solid #111;font-size:15px}.receipt footer{text-align:center;white-space:pre-line;margin-top:5mm;font-size:9px}`);
 }
 
+function deliveryReceipt(database: PosDatabase, id: string) {
+  const order = database.getOrder(id) as any;
+  const payload = order.payload ?? {};
+  const rawItems = payload.items ?? payload.orderItems ?? [];
+  const items = rawItems.map((item: any) => {
+    const product = item.product ?? {};
+    const template = product.variant?.product ?? product.productTemplate ?? {};
+    const unitPrice = Number(item.price ?? item.unitPrice ?? product.price ?? 0);
+    const quantity = Number(item.quantity ?? 1);
+    return {
+      product_name: product.customName ?? template.name ?? item.name ?? "Product",
+      variant_name: product.variant?.name ?? item.variantName ?? null,
+      sku: product.vendorSku ?? product.variant?.sku ?? item.sku ?? null,
+      quantity,
+      unit_price: unitPrice,
+      total: Number(item.total ?? unitPrice * quantity),
+    };
+  });
+  const subtotal = Number(payload.subtotal ?? order.total ?? items.reduce((sum: number, item: any) => sum + item.total, 0));
+  return {
+    sale: {
+      sale_number: `ORD-${order.server_id}`,
+      created_at: payload.createdAt ?? payload.date ?? order.updated_at,
+      customer_name: order.customer_name ?? payload.walkInCustomerName ?? payload.client?.user?.name,
+      subtotal,
+      discount_total: Number(payload.discount ?? 0),
+      tax_total: Number(payload.appTax ?? 0) + Number(payload.storeTax ?? 0) + Number(payload.deliveryTax ?? 0),
+      total: Number(payload.total ?? subtotal),
+      payment_method: payload.paymentMethod ?? "CASH",
+      amount_tendered: Number(payload.total ?? subtotal),
+      change_due: 0,
+    },
+    items,
+  };
+}
+
+export function previewInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string) {
+  if (source === "POS") return previewReceipt(database, id);
+  const { sale, items } = deliveryReceipt(database, id);
+  return receiptHtml(sale, items, database.getSettings());
+}
+
+export async function printInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string, printerName?: string) {
+  await printHtml(previewInvoice(database, source, id), printerName);
+}
+
+export function previewStockEntry(database: PosDatabase, id: string) {
+  const { entry, items } = database.getStockEntry(id) as any;
+  const settings = database.getSettings();
+  const language = languageOf(settings);
+  const width = numberSetting(settings, "receiptPaperWidth", 80, 48, 100);
+  const title = language === "ar" ? "إيصال استلام مخزون" : "Stock receiving note";
+  const supplier = language === "ar" ? "المورد" : "Supplier";
+  const reference = language === "ar" ? "مرجع المورد" : "Supplier reference";
+  const quantity = language === "ar" ? "الكمية" : "Qty";
+  const unitCost = language === "ar" ? "تكلفة الوحدة" : "Unit cost";
+  const total = language === "ar" ? "الإجمالي" : "Total";
+  const lines = items.map((item: any) => `<div class="entry-line"><strong>${escape(item.product_name)}</strong>${item.variant_name ? `<small>${escape(item.variant_name)}</small>` : ""}<div class="row"><span>${quantity}: ${item.quantity} · ${unitCost}: ${money(item.unit_cost)}</span><strong>${money(item.total_cost)}</strong></div></div>`).join("");
+  const body = `<main class="receipt"><header><h1>${escape(settings.storeName || "Shea POS")}</h1><p>${title}</p></header><div class="meta"><strong>${escape(entry.entry_number)}</strong><span>${escape(new Date(entry.entry_date).toLocaleString(language === "ar" ? "ar-DZ" : "en-DZ"))}</span></div>${entry.supplier_name ? `<p>${supplier}: ${escape(entry.supplier_name)}</p>` : ""}${entry.supplier_invoice ? `<p>${reference}: ${escape(entry.supplier_invoice)}</p>` : ""}<div class="rule"></div>${lines}<div class="rule"></div><div class="row grand"><strong>${total}</strong><strong>${money(entry.total_cost)}</strong></div>${entry.note ? `<footer>${escape(entry.note)}</footer>` : ""}</main>`;
+  return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;min-height:90mm;padding:4mm;font-size:10px}.receipt header{text-align:center;margin-bottom:3mm}.receipt h1{font-size:18px;margin:0}.receipt header p,.receipt>p,.meta span{margin:1mm 0;color:#444;font-size:9px}.meta{display:flex;justify-content:space-between;gap:3mm}.rule{border-top:1px dashed #111;margin:3mm 0}.entry-line{display:flex;flex-direction:column;margin:2.5mm 0}.entry-line small{color:#555}.row{display:flex;justify-content:space-between;gap:3mm}.grand{padding-top:2mm;font-size:14px}.receipt footer{text-align:center;margin-top:5mm;font-size:9px}`);
+}
+
+export async function printStockEntry(database: PosDatabase, id: string, printerName?: string) {
+  await printHtml(previewStockEntry(database, id), printerName);
+}
+
 export function priceLabelHtml(products: Array<{ product: any; copies: number }>, settings: PrintSettings) {
   const language = languageOf(settings);
   const width = numberSetting(settings, "labelWidth", 50, 25, 100);

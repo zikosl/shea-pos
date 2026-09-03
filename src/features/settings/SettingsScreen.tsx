@@ -29,6 +29,7 @@ const defaults: Record<string, string> = {
   labelShowVariant: "true",
   labelShowSku: "true",
   labelShowBarcode: "true",
+  localSessionTimeout: "15",
 };
 
 export function SettingsScreen({
@@ -179,6 +180,15 @@ export function SettingsScreen({
           <label>
             {t("brandColor")}
             <input className="color-input" type="color" value={draft.primaryColor} onChange={(event) => change("primaryColor", event.target.value, true)} />
+          </label>
+          <label>
+            {t("sessionTimeout")}
+            <select value={draft.localSessionTimeout} onChange={(event) => change("localSessionTimeout", event.target.value)}>
+              <option value="5">5 {t("minutes")}</option>
+              <option value="15">15 {t("minutes")}</option>
+              <option value="30">30 {t("minutes")}</option>
+              <option value="60">60 {t("minutes")}</option>
+            </select>
           </label>
           <label>
             {t("storeLogo")}

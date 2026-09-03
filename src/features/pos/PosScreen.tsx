@@ -94,18 +94,6 @@ export function PosScreen({
     change = Math.max(0, tendered - total);
   const cashOptions = useMemo(() => suggestedCash(total), [total]);
   useEffect(() => setAmountTendered(total ? String(total) : ""), [total]);
-  useEffect(() => {
-    const shortcut = (event: KeyboardEvent) => {
-      if (event.key === "F2") {
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-      if (event.key === "Escape" && !completedSale) setCart([]);
-    };
-    addEventListener("keydown", shortcut);
-    return () => removeEventListener("keydown", shortcut);
-  }, [completedSale]);
-
   function add(product: Product) {
     setCart((current) => {
       const found = current.find(
@@ -236,6 +224,7 @@ export function PosScreen({
           <div className="pos-search">
             <Search />
             <input
+              data-keyboard-search
               ref={searchRef}
               value={search}
               onChange={(event) => {

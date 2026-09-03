@@ -1,4 +1,5 @@
 import type { PosApi } from "../electron/contracts";
+import type { CapabilityCode, Permission, LocalRole } from "../electron/contracts";
 
 declare global {
   interface Window {
@@ -16,6 +17,20 @@ export type AppState = {
   offlineUntil: string | null;
   offlineAllowed: boolean;
   pendingChanges: number;
+  capabilities: CapabilityCode[];
+  localAccess: {
+    setupRequired: boolean;
+    authenticated: boolean;
+    user: {
+      id: string;
+      name: string;
+      username: string;
+      role: LocalRole;
+      permissions: Permission[];
+      active: boolean;
+    } | null;
+    permissions: Permission[];
+  };
 };
 
 export type Product = {

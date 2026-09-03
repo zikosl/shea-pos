@@ -13,6 +13,7 @@ import { localeFor, localizeValue, useI18n } from "../../i18n";
 import { money } from "../../shared/format";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
 import { PageHeader } from "../../components/PageHeader";
+import { DatePicker } from "../../components/DateTimePicker";
 import { localizeError } from "../../i18n";
 
 type Report = any;
@@ -89,18 +90,18 @@ export function ReportsScreen({
         <div className="date-range">
           <label>
             {t("from")}
-            <input
-              type="date"
+            <DatePicker
               value={custom.from}
-              onChange={(e) => setCustom({ ...custom, from: e.target.value })}
+              onChange={(from) => setCustom({ ...custom, from })}
+              max={custom.to || undefined}
             />
           </label>
           <label>
             {t("to")}
-            <input
-              type="date"
+            <DatePicker
               value={custom.to}
-              onChange={(e) => setCustom({ ...custom, to: e.target.value })}
+              onChange={(to) => setCustom({ ...custom, to })}
+              min={custom.from || undefined}
             />
           </label>
           <button

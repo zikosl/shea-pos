@@ -5,6 +5,8 @@ import type {
   ActivateProductInput,
   CheckoutInput,
   CreateLocalProductInput,
+  CreateStockEntryInput,
+  CreateCustomOrderInput,
   ProposalInput,
 } from "./contracts";
 import { calculateTotals, prepareLine } from "./domain/sale";
@@ -25,6 +27,7 @@ type BootstrapPayload = {
   productRequests?: any[];
   orders: any[];
   openCashSession?: any;
+  extensions?: { giftStore?: { orders?: any[]; templates?: any[] } | null };
 };
 
 export class PosDatabase {
@@ -169,6 +172,159 @@ export class PosDatabase {
           .prepare("INSERT INTO schema_migrations(version) VALUES (4)")
           .run();
       })();
+    const hasStockEntryMigration = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE version=5")
+      .get();
+    if (!hasStockEntryMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE stock_entries (
+            id TEXT PRIMARY KEY, entry_number TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'POSTED', supplier_name TEXT,
+            supplier_invoice TEXT, entry_date TEXT NOT NULL, note TEXT,
+            total_cost REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            cancelled_at TEXT
+          );
+          CREATE TABLE stock_entry_items (
+            id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, product_local_id TEXT NOT NULL,
+            product_name TEXT NOT NULL, variant_name TEXT, quantity REAL NOT NULL,
+            pricing_mode TEXT NOT NULL, entered_price REAL NOT NULL,
+            unit_cost REAL NOT NULL, total_cost REAL NOT NULL,
+            stock_before REAL NOT NULL, stock_after REAL NOT NULL,
+            cost_before REAL NOT NULL, cost_after REAL NOT NULL,
+            FOREIGN KEY(entry_id) REFERENCES stock_entries(id) ON DELETE CASCADE
+          );
+          CREATE INDEX stock_entries_date_idx ON stock_entries(entry_date,status);
+          CREATE INDEX stock_entry_items_entry_idx ON stock_entry_items(entry_id);
+          ALTER TABLE stock_movements ADD COLUMN stock_entry_id TEXT;
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (5)").run();
+      })();
+    const hasLocalUsersMigration = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE version=6")
+      .get();
+    if (!hasLocalUsersMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE local_users (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL, role TEXT NOT NULL,
+            permissions_json TEXT NOT NULL DEFAULT '[]', active INTEGER NOT NULL DEFAULT 1,
+            failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT
+          );
+          CREATE INDEX local_users_active_idx ON local_users(active,name);
+          CREATE TABLE audit_logs (
+            id TEXT PRIMARY KEY, user_id TEXT, user_name TEXT NOT NULL,
+            action TEXT NOT NULL, entity_type TEXT, entity_id TEXT,
+            details_json TEXT, created_at TEXT NOT NULL
+          );
+          CREATE INDEX audit_logs_created_idx ON audit_logs(created_at,action);
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (6)").run();
+      })();
+    const hasOperatorAttributionMigration = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE version=7")
+      .get();
+    if (!hasOperatorAttributionMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE sales ADD COLUMN operator_id TEXT;
+          ALTER TABLE sales ADD COLUMN operator_name TEXT;
+          ALTER TABLE stock_entries ADD COLUMN operator_id TEXT;
+          ALTER TABLE stock_entries ADD COLUMN operator_name TEXT;
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (7)").run();
+      })();
+    const hasLocalProductImagesMigration = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE version=8")
+      .get();
+    if (!hasLocalProductImagesMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE products ADD COLUMN remote_image_url TEXT;
+          ALTER TABLE products ADD COLUMN local_image_path TEXT;
+          ALTER TABLE products ADD COLUMN image_sync_state TEXT NOT NULL DEFAULT 'PENDING';
+          ALTER TABLE products ADD COLUMN image_checksum TEXT;
+          ALTER TABLE products ADD COLUMN image_sync_error TEXT;
+          UPDATE products SET remote_image_url=image
+          WHERE image IS NOT NULL AND image<>'';
+          CREATE INDEX products_image_sync_idx ON products(active,image_sync_state);
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (8)").run();
+      })();
+    const hasGiftStoreMigration = this.db
+      .prepare("SELECT 1 FROM schema_migrations WHERE version=9")
+      .get();
+    if (!hasGiftStoreMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE custom_orders (
+            id TEXT PRIMARY KEY, order_number TEXT NOT NULL, customer_name TEXT NOT NULL,
+            status TEXT NOT NULL, required_at TEXT, fulfillment_mode TEXT NOT NULL,
+            total REAL NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
+            payload_json TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          CREATE INDEX custom_orders_status_idx ON custom_orders(status,required_at,updated_at);
+          CREATE TABLE gift_templates (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, occasion TEXT, image TEXT,
+            payload_json TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (9)").run();
+      })();
+    const hasGiftSyncMigration = this.db.prepare("SELECT 1 FROM schema_migrations WHERE version=10").get();
+    if (!hasGiftSyncMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE custom_orders ADD COLUMN server_id TEXT;
+          ALTER TABLE custom_orders ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'SYNCED';
+          ALTER TABLE custom_orders ADD COLUMN last_error TEXT;
+          ALTER TABLE custom_orders ADD COLUMN created_at TEXT;
+          CREATE UNIQUE INDEX custom_orders_server_idx ON custom_orders(server_id);
+          UPDATE custom_orders SET server_id=id,created_at=updated_at;
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (10)").run();
+      })();
+    const hasGiftNicheMigration = this.db.prepare("SELECT 1 FROM schema_migrations WHERE version=11").get();
+    if (!hasGiftNicheMigration)
+      this.db.transaction(() => {
+        this.db.exec("ALTER TABLE custom_orders ADD COLUMN niche_id INTEGER;");
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (11)").run();
+      })();
+  }
+
+  private productImageUrl(row: any) {
+    return row.local_image_path
+      ? `shea-asset://local/${String(row.local_image_path).split("/").map(encodeURIComponent).join("/")}`
+      : null;
+  }
+
+  productImageCandidates() {
+    return this.db.prepare(
+      `SELECT local_id,remote_image_url,local_image_path,image_sync_state FROM products
+       WHERE active=1 AND remote_image_url IS NOT NULL AND remote_image_url<>''
+       ORDER BY updated_at`,
+    ).all() as Array<{ local_id: string; remote_image_url: string; local_image_path?: string | null; image_sync_state: string }>;
+  }
+
+  productImageCandidate(localId: string) {
+    return this.db.prepare(
+      `SELECT local_id,remote_image_url,local_image_path,image_sync_state FROM products
+       WHERE local_id=? AND active=1 AND remote_image_url IS NOT NULL AND remote_image_url<>''`,
+    ).get(localId) as { local_id: string; remote_image_url: string; local_image_path?: string | null; image_sync_state: string } | undefined;
+  }
+
+  markProductImageReady(localId: string, relativePath: string, checksum?: string) {
+    this.db.prepare(
+      "UPDATE products SET local_image_path=?,image_checksum=COALESCE(?,image_checksum),image_sync_state='READY',image_sync_error=NULL WHERE local_id=?",
+    ).run(relativePath, checksum ?? null, localId);
+  }
+
+  markProductImageFailed(localId: string, message: string) {
+    this.db.prepare(
+      "UPDATE products SET image_sync_state='FAILED',image_sync_error=? WHERE local_id=?",
+    ).run(message.slice(0, 500), localId);
   }
 
   getSetting(key: string) {
@@ -247,6 +403,7 @@ export class PosDatabase {
     input: {
       search?: string;
       categoryId?: number;
+      nicheId?: number;
       limit?: number;
       offset?: number;
     } = {},
@@ -361,9 +518,9 @@ export class PosDatabase {
         "INSERT OR REPLACE INTO variants(id,template_id,name,description,sku,image,tags_json) VALUES (@id,@template_id,@name,@description,@sku,@image,@tags_json)",
       );
       const upsertProduct = this.db
-        .prepare(`INSERT INTO products(local_id,server_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,barcode,image,price,cost_price,discount,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional,updated_at)
-        VALUES (@local_id,@server_id,@variant_id,@template_id,@category_id,@product_type_id,@brand_id,@name,@variant_name,@sku,@barcode,@image,@price,@cost_price,@discount,@stock,@reorder_threshold,@inventory_policy,@available,@visible_in_pos,@active,0,CURRENT_TIMESTAMP)
-        ON CONFLICT(local_id) DO UPDATE SET server_id=excluded.server_id,variant_id=excluded.variant_id,template_id=excluded.template_id,category_id=excluded.category_id,product_type_id=excluded.product_type_id,brand_id=excluded.brand_id,name=excluded.name,variant_name=excluded.variant_name,sku=excluded.sku,barcode=excluded.barcode,image=excluded.image,price=excluded.price,cost_price=excluded.cost_price,discount=excluded.discount,stock=excluded.stock,reorder_threshold=excluded.reorder_threshold,inventory_policy=excluded.inventory_policy,available=excluded.available,visible_in_pos=excluded.visible_in_pos,active=excluded.active,provisional=0,updated_at=CURRENT_TIMESTAMP`);
+        .prepare(`INSERT INTO products(local_id,server_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,barcode,image,remote_image_url,price,cost_price,discount,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional,updated_at)
+        VALUES (@local_id,@server_id,@variant_id,@template_id,@category_id,@product_type_id,@brand_id,@name,@variant_name,@sku,@barcode,@image,@image,@price,@cost_price,@discount,@stock,@reorder_threshold,@inventory_policy,@available,@visible_in_pos,@active,0,CURRENT_TIMESTAMP)
+        ON CONFLICT(local_id) DO UPDATE SET server_id=excluded.server_id,variant_id=excluded.variant_id,template_id=excluded.template_id,category_id=excluded.category_id,product_type_id=excluded.product_type_id,brand_id=excluded.brand_id,name=excluded.name,variant_name=excluded.variant_name,sku=excluded.sku,barcode=excluded.barcode,image=excluded.image,remote_image_url=excluded.remote_image_url,image_sync_state=CASE WHEN COALESCE(products.remote_image_url,'')<>COALESCE(excluded.remote_image_url,'') THEN 'PENDING' ELSE products.image_sync_state END,price=excluded.price,cost_price=excluded.cost_price,discount=excluded.discount,stock=excluded.stock,reorder_threshold=excluded.reorder_threshold,inventory_policy=excluded.inventory_policy,available=excluded.available,visible_in_pos=excluded.visible_in_pos,active=excluded.active,provisional=0,updated_at=CURRENT_TIMESTAMP`);
 
       this.db.exec(
         "DELETE FROM niches; DELETE FROM categories; DELETE FROM product_types; DELETE FROM brands; DELETE FROM templates; DELETE FROM variants;",
@@ -564,6 +721,42 @@ export class PosDatabase {
         );
       }
 
+      this.db.prepare("DELETE FROM custom_orders WHERE sync_state='SYNCED'").run();
+      this.db.exec("DELETE FROM gift_templates;");
+      const upsertCustomOrder = this.db.prepare(
+        `INSERT INTO custom_orders(id,server_id,order_number,customer_name,status,required_at,fulfillment_mode,total,version,payload_json,sync_state,created_at,updated_at,niche_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'SYNCED',?,?,?)
+         ON CONFLICT(server_id) DO UPDATE SET order_number=excluded.order_number,customer_name=excluded.customer_name,status=excluded.status,required_at=excluded.required_at,fulfillment_mode=excluded.fulfillment_mode,total=excluded.total,version=excluded.version,payload_json=excluded.payload_json,niche_id=excluded.niche_id,sync_state='SYNCED',last_error=NULL,updated_at=excluded.updated_at`,
+      );
+      for (const row of payload.extensions?.giftStore?.orders ?? [])
+        upsertCustomOrder.run(
+          row.id,
+          row.id,
+          row.orderNumber,
+          row.customerName,
+          row.status,
+          row.requiredAt ?? null,
+          row.fulfillmentMode,
+          row.total ?? 0,
+          row.version ?? 1,
+          JSON.stringify(row),
+          row.createdAt ?? row.updatedAt ?? new Date().toISOString(),
+          row.updatedAt ?? new Date().toISOString(),
+          row.nicheId ?? null,
+        );
+      const upsertGiftTemplate = this.db.prepare(
+        "INSERT INTO gift_templates(id,name,occasion,image,payload_json,updated_at) VALUES (?,?,?,?,?,?)",
+      );
+      for (const row of payload.extensions?.giftStore?.templates ?? [])
+        upsertGiftTemplate.run(
+          row.id,
+          row.name,
+          row.occasion ?? null,
+          row.image ?? null,
+          JSON.stringify(row),
+          row.updatedAt ?? new Date().toISOString(),
+        );
+
       if (payload.openCashSession) {
         const row = payload.openCashSession;
         const local = this.db
@@ -592,6 +785,7 @@ export class PosDatabase {
       }
 
       this.setSetting("partner", JSON.stringify(payload.partner));
+      this.setSetting("capabilities", JSON.stringify((payload.partner as any).capabilities ?? []));
       this.setSetting("device", JSON.stringify(payload.device));
       this.setSetting("syncCursor", cursor);
       this.setSetting("offlineUntil", offlineUntil);
@@ -603,6 +797,7 @@ export class PosDatabase {
     input: {
       search?: string;
       categoryId?: number;
+      nicheId?: number;
       limit?: number;
       offset?: number;
     } = {},
@@ -610,13 +805,15 @@ export class PosDatabase {
     const search = `%${input.search?.trim() ?? ""}%`;
     const rows = this.db
       .prepare(
-        `SELECT p.*,t.name_ar FROM products p LEFT JOIN templates t ON t.id=p.template_id WHERE p.active=1 AND p.visible_in_pos=1
-      AND (? IS NULL OR p.category_id=?) AND (p.name LIKE ? OR COALESCE(t.name_ar,'') LIKE ? OR COALESCE(p.sku,'') LIKE ? OR COALESCE(p.barcode,'') LIKE ? OR COALESCE(p.variant_name,'') LIKE ?)
+        `SELECT p.*,t.name_ar FROM products p LEFT JOIN templates t ON t.id=p.template_id LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1 AND p.visible_in_pos=1
+      AND (? IS NULL OR p.category_id=?) AND (? IS NULL OR c.niche_id=?) AND (p.name LIKE ? OR COALESCE(t.name_ar,'') LIKE ? OR COALESCE(p.sku,'') LIKE ? OR COALESCE(p.barcode,'') LIKE ? OR COALESCE(p.variant_name,'') LIKE ?)
       ORDER BY p.name LIMIT ? OFFSET ?`,
       )
       .all(
         input.categoryId ?? null,
         input.categoryId ?? null,
+        input.nicheId ?? null,
+        input.nicheId ?? null,
         search,
         search,
         search,
@@ -625,12 +822,9 @@ export class PosDatabase {
         Math.min(input.limit ?? 100, 250),
         input.offset ?? 0,
       );
-    const assetBase = this.getSetting("assetBase") ?? "";
     return (rows as any[]).map((row) => ({
       ...row,
-      image: row.image?.startsWith("/")
-        ? `${assetBase}${row.image}`
-        : row.image,
+      image: this.productImageUrl(row),
     }));
   }
 
@@ -651,12 +845,9 @@ export class PosDatabase {
         Math.min(input.limit ?? 100, 250),
         input.offset ?? 0,
       );
-    const assetBase = this.getSetting("assetBase") ?? "";
     return (rows as any[]).map((row) => ({
       ...row,
-      image: row.image?.startsWith("/")
-        ? `${assetBase}${row.image}`
-        : row.image,
+      image: this.productImageUrl(row),
     }));
   }
 
@@ -675,7 +866,7 @@ export class PosDatabase {
         `SELECT m.*,p.name product_name,t.name_ar product_name_ar,p.variant_name,p.sku FROM stock_movements m JOIN products p ON p.local_id=m.product_local_id LEFT JOIN templates t ON t.id=p.template_id
       WHERE (? IS NULL OR m.type=?) AND (? IS NULL OR m.product_local_id=?)
       AND (p.name LIKE ? OR COALESCE(p.variant_name,'') LIKE ? OR COALESCE(p.sku,'') LIKE ? OR COALESCE(m.reason,'') LIKE ?)
-      ORDER BY m.created_at DESC LIMIT ? OFFSET ?`,
+      ORDER BY m.created_at DESC,m.rowid DESC LIMIT ? OFFSET ?`,
       )
       .all(
         input.type ?? null,
@@ -700,6 +891,200 @@ export class PosDatabase {
     return this.db
       .prepare("SELECT * FROM orders ORDER BY updated_at DESC LIMIT 100")
       .all();
+  }
+  listGiftOrders() {
+    return this.db.prepare(
+      "SELECT * FROM custom_orders ORDER BY CASE WHEN required_at IS NULL THEN 1 ELSE 0 END,required_at,updated_at DESC",
+    ).all();
+  }
+  createCustomOrder(input: CreateCustomOrderInput) {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const orderNumber = `GFT-LOCAL-${Date.now().toString(36).toUpperCase()}`;
+    const lines = input.lines.map((line) => {
+      const product = line.productLocalId
+        ? this.db.prepare("SELECT server_id,name,cost_price FROM products WHERE local_id=? AND active=1").get(line.productLocalId) as any
+        : null;
+      return {
+        productId: product?.server_id ?? undefined,
+        name: line.name.trim() || product?.name,
+        description: line.description?.trim() || undefined,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        unitCost: line.unitCost ?? product?.cost_price ?? 0,
+      };
+    });
+    const subtotal = lines.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0);
+    const payload = { ...input, orderNumber, lines, targetStatus: "REQUESTED" };
+    const snapshot = { ...payload, id, status: "REQUESTED", subtotal, total: Math.max(0, subtotal - (input.discount ?? 0)), version: 1, createdAt: now, updatedAt: now };
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO custom_orders(id,order_number,customer_name,status,required_at,fulfillment_mode,total,version,payload_json,sync_state,created_at,updated_at,niche_id)
+        VALUES (?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)`).run(id, orderNumber, input.customerName.trim(), "REQUESTED", input.requiredAt ?? null, input.fulfillmentMode, snapshot.total, 1, JSON.stringify(snapshot), now, now, input.nicheId ?? null);
+      this.enqueue("CREATE_CUSTOM_ORDER", "CustomOrder", id, payload);
+    })();
+    return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
+  }
+
+  transitionCustomOrder(id: string, status: string) {
+    const row = this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id) as any;
+    if (!row) throw new Error("Custom order not found");
+    if (!row.server_id) throw new Error("Synchronize this new order before changing its workflow");
+    const expectedVersion = row.version;
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE custom_orders SET status=?,version=version+1,sync_state='PENDING',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, id);
+      this.enqueue("TRANSITION_CUSTOM_ORDER", "CustomOrder", id, { serverId: row.server_id, status, expectedVersion });
+    })();
+    return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
+  }
+
+  queueCustomOrderCommand(id: string, operation: "CREATE_CUSTOM_ORDER_QUOTATION" | "RESERVE_CUSTOM_ORDER_MATERIALS", optimisticStatus: string) {
+    const row = this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id) as any;
+    if (!row) throw new Error("Custom order not found");
+    if (!row.server_id) throw new Error("Synchronize this new order before changing its workflow");
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE custom_orders SET status=?,sync_state='PENDING',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(optimisticStatus, id);
+      this.enqueue(operation, "CustomOrder", id, { serverId: row.server_id });
+    })();
+    return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
+  }
+
+  markCustomOrderCreated(localId: string, order: any) {
+    this.db.prepare("UPDATE custom_orders SET server_id=?,status=?,version=?,payload_json=?,sync_state='SYNCED',last_error=NULL,updated_at=? WHERE id=?")
+      .run(order.id, order.status, order.version, JSON.stringify(order), order.updatedAt ?? new Date().toISOString(), localId);
+  }
+
+  markCustomOrderTransitioned(localId: string, order: any) {
+    this.db.prepare("UPDATE custom_orders SET status=?,version=?,payload_json=?,sync_state='SYNCED',last_error=NULL,updated_at=? WHERE id=?")
+      .run(order.status, order.version, JSON.stringify(order), order.updatedAt ?? new Date().toISOString(), localId);
+  }
+
+  markCustomOrderCommandSynced(localId: string) {
+    this.db.prepare("UPDATE custom_orders SET sync_state='SYNCED',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(localId);
+  }
+  listInvoices() {
+    const sales = this.listSales().map((row: any) => ({
+      id: row.id,
+      number: row.sale_number,
+      source: "POS",
+      customer_name: row.customer_name,
+      status: row.status,
+      total: row.total,
+      sync_state: row.sync_state,
+      operator_name: row.operator_name,
+      created_at: row.created_at,
+    }));
+    const orders = this.listOrders().map((row: any) => {
+      let payload: any = {};
+      try { payload = JSON.parse(row.payload_json); } catch { /* Keep the local row usable. */ }
+      return {
+        id: String(row.server_id),
+        number: `ORD-${row.server_id}`,
+        source: "DELIVERY",
+        customer_name: row.customer_name ?? payload.walkInCustomerName ?? payload.client?.user?.name,
+        status: row.status,
+        total: row.total,
+        sync_state: "SYNCED",
+        created_at: payload.createdAt ?? payload.date ?? row.updated_at,
+      };
+    });
+    return [...sales, ...orders].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+  }
+  getOrder(serverId: string | number) {
+    const row = this.db.prepare("SELECT * FROM orders WHERE server_id=?").get(serverId) as any;
+    if (!row) throw new Error("Delivery invoice not found");
+    return { ...row, payload: JSON.parse(row.payload_json) };
+  }
+  listStockEntries() {
+    return this.db.prepare(
+      `SELECT e.*,COUNT(i.id) item_count FROM stock_entries e
+       LEFT JOIN stock_entry_items i ON i.entry_id=e.id
+       GROUP BY e.id ORDER BY e.entry_date DESC,e.created_at DESC LIMIT 250`,
+    ).all();
+  }
+  getStockEntry(id: string) {
+    const entry = this.db.prepare("SELECT * FROM stock_entries WHERE id=?").get(id);
+    if (!entry) throw new Error("Stock entry not found");
+    return {
+      entry,
+      items: this.db.prepare("SELECT * FROM stock_entry_items WHERE entry_id=? ORDER BY rowid").all(id),
+    };
+  }
+  createStockEntry(input: CreateStockEntryInput) {
+    if (!input.lines.length) throw new Error("Add at least one product");
+    if (new Set(input.lines.map((line) => line.productLocalId)).size !== input.lines.length)
+      throw new Error("A product can only appear once in a stock entry");
+    if (input.lines.some((line) => !Number.isFinite(line.quantity) || line.quantity <= 0 || !Number.isFinite(line.price) || line.price < 0))
+      throw new Error("Stock entry quantities and prices are invalid");
+    return this.db.transaction(() => {
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const entryDate = input.entryDate ?? now;
+      const entryNumber = `GRN-${entryDate.slice(0, 10).replaceAll("-", "")}-${id.slice(0, 4).toUpperCase()}`;
+      let totalCost = 0;
+      this.db.prepare(
+        `INSERT INTO stock_entries(id,entry_number,status,supplier_name,supplier_invoice,entry_date,note,total_cost,created_at,operator_id,operator_name)
+         VALUES (?,?,'POSTED',?,?,?,?,0,?,?,?)`,
+      ).run(id, entryNumber, input.supplierName ?? null, input.supplierInvoice ?? null, entryDate, input.note ?? null, now, input.operatorId ?? null, input.operatorName ?? null);
+      for (const line of input.lines) {
+        const product = this.getProductByLocalId(line.productLocalId);
+        if (!product) throw new Error("Product not found");
+        if (product.inventory_policy !== "TRACKED") throw new Error(`${product.name} does not track stock`);
+        const unitCost = line.pricingMode === "TOTAL" ? line.price / line.quantity : line.price;
+        const lineTotal = unitCost * line.quantity;
+        const nextStock = Number(product.stock) + line.quantity;
+        const nextCost = nextStock > 0
+          ? ((Number(product.stock) * Number(product.cost_price)) + lineTotal) / nextStock
+          : unitCost;
+        this.db.prepare(
+          `INSERT INTO stock_entry_items(id,entry_id,product_local_id,product_name,variant_name,quantity,pricing_mode,entered_price,unit_cost,total_cost,stock_before,stock_after,cost_before,cost_after)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ).run(randomUUID(), id, product.local_id, product.name, product.variant_name, line.quantity, line.pricingMode, line.price, unitCost, lineTotal, product.stock, nextStock, product.cost_price, nextCost);
+        this.db.prepare("UPDATE products SET stock=?,cost_price=?,updated_at=CURRENT_TIMESTAMP WHERE local_id=?")
+          .run(nextStock, nextCost, product.local_id);
+        this.db.prepare(
+          `INSERT INTO stock_movements(id,product_local_id,stock_entry_id,type,quantity_delta,stock_before,stock_after,reason,sync_state,created_at)
+           VALUES (?,?,?,'RECEIPT',?,?,?,?, 'PENDING',?)`,
+        ).run(randomUUID(), product.local_id, id, line.quantity, product.stock, nextStock, entryNumber, now);
+        if (product.server_id) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
+          serverId: product.server_id,
+          stock: nextStock,
+          costPrice: nextCost,
+        });
+        totalCost += lineTotal;
+      }
+      this.db.prepare("UPDATE stock_entries SET total_cost=? WHERE id=?").run(totalCost, id);
+      return this.getStockEntry(id);
+    })();
+  }
+  cancelStockEntry(id: string) {
+    return this.db.transaction(() => {
+      const record = this.getStockEntry(id) as any;
+      if (record.entry.status !== "POSTED") throw new Error("Only posted entries can be cancelled");
+      const now = new Date().toISOString();
+      for (const item of record.items) {
+        const product = this.getProductByLocalId(item.product_local_id);
+        if (!product || Number(product.stock) < Number(item.quantity))
+          throw new Error(`Cannot reverse ${item.product_name}: stock has already been consumed`);
+        const nextStock = Number(product.stock) - Number(item.quantity);
+        const remainingValue = (Number(product.stock) * Number(product.cost_price)) - Number(item.total_cost);
+        const nextCost = nextStock > 0 ? Math.max(0, remainingValue / nextStock) : 0;
+        this.db.prepare("UPDATE products SET stock=?,cost_price=?,updated_at=CURRENT_TIMESTAMP WHERE local_id=?")
+          .run(nextStock, nextCost, product.local_id);
+        this.db.prepare(
+          `INSERT INTO stock_movements(id,product_local_id,stock_entry_id,type,quantity_delta,stock_before,stock_after,reason,sync_state,created_at)
+           VALUES (?,?,?,'REMOVAL',?,?,?,?, 'PENDING',?)`,
+        ).run(randomUUID(), product.local_id, id, -Number(item.quantity), product.stock, nextStock, `CANCEL ${record.entry.entry_number}`, now);
+        if (product.server_id) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
+          serverId: product.server_id,
+          stock: nextStock,
+          costPrice: nextCost,
+        });
+      }
+      this.db.prepare("UPDATE stock_entries SET status='CANCELLED',cancelled_at=? WHERE id=?").run(now, id);
+      return this.getStockEntry(id);
+    })();
   }
   listProposals() {
     return this.db
@@ -748,8 +1133,8 @@ export class PosDatabase {
       const localId = randomUUID();
       this.db
         .prepare(
-          `INSERT INTO products(local_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,image,price,cost_price,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,1,1)`,
+          `INSERT INTO products(local_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,image,remote_image_url,price,cost_price,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,1,1)`,
         )
         .run(
           localId,
@@ -761,6 +1146,7 @@ export class PosDatabase {
           variant.template_name,
           variant.name,
           variant.sku,
+          variant.image || variant.template_image,
           variant.image || variant.template_image,
           input.price,
           input.costPrice ?? 0,
@@ -785,8 +1171,8 @@ export class PosDatabase {
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO products(local_id,category_id,product_type_id,brand_id,name,variant_name,sku,image,price,cost_price,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional,request_status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,1,'LOCAL_DRAFT')`,
+          `INSERT INTO products(local_id,category_id,product_type_id,brand_id,name,variant_name,sku,image,remote_image_url,price,cost_price,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,provisional,request_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,1,'LOCAL_DRAFT')`,
         )
         .run(
           localId,
@@ -796,6 +1182,7 @@ export class PosDatabase {
           input.name.trim(),
           variantName,
           input.sku ?? null,
+          input.image ?? null,
           input.image ?? null,
           input.price,
           input.costPrice ?? 0,
@@ -975,8 +1362,8 @@ export class PosDatabase {
         input.paymentMethod === "CASH" ? Math.max(0, tendered - total) : 0;
       this.db
         .prepare(
-          `INSERT INTO sales(id,sale_number,status,customer_name,note,subtotal,discount_total,tax_total,total,cost_total,gross_profit,partner_fee,net_profit,payment_method,amount_tendered,change_due,sync_state,created_at)
-        VALUES (?,?, 'COMPLETED',?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?)`,
+          `INSERT INTO sales(id,sale_number,status,customer_name,note,subtotal,discount_total,tax_total,total,cost_total,gross_profit,partner_fee,net_profit,payment_method,amount_tendered,change_due,sync_state,created_at,operator_id,operator_name)
+        VALUES (?,?, 'COMPLETED',?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)`,
         )
         .run(
           saleId,
@@ -995,6 +1382,8 @@ export class PosDatabase {
           tendered,
           changeDue,
           createdAt,
+          input.operatorId ?? null,
+          input.operatorName ?? null,
         );
       for (const snapshot of snapshots) {
         const itemId = randomUUID();

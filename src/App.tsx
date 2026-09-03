@@ -5,6 +5,8 @@ import {
   Cloud,
   CloudOff,
   FileClock,
+  Gift,
+  Keyboard,
   Languages,
   LoaderCircle,
   LogOut,
@@ -15,13 +17,19 @@ import {
   RefreshCw,
   Settings,
   ShoppingBag,
+  UsersRound,
+  UserRoundCog,
 } from "lucide-react";
 import { CatalogRequestsScreen } from "./features/catalog/CatalogRequestsScreen";
-import { OrdersScreen, SalesScreen } from "./features/history/HistoryScreens";
+import { InvoicesScreen, OrdersScreen } from "./features/history/HistoryScreens";
 import { InventoryScreen } from "./features/inventory/InventoryScreen";
+import { StockEntriesScreen } from "./features/inventory/StockEntriesScreen";
 import { PosScreen } from "./features/pos/PosScreen";
 import { SettingsScreen } from "./features/settings/SettingsScreen";
 import { ReportsScreen } from "./features/reports/ReportsScreen";
+import { LocalAccessScreen } from "./features/access/LocalAccessScreen";
+import { TeamScreen } from "./features/access/TeamScreen";
+import { GiftStoreScreen } from "./features/gift-store/GiftStoreScreen";
 import {
   I18nProvider,
   localeFor,
@@ -30,10 +38,15 @@ import {
   type Language,
 } from "./i18n";
 import type { AppState } from "./types";
+import type { Permission } from "../electron/contracts";
 import { ErrorState } from "./components/AsyncState";
+import {
+  KeyboardShortcuts,
+  type KeyboardShortcut,
+} from "./components/KeyboardShortcuts";
 
 type Page =
-  "pos" | "stock" | "orders" | "sales" | "reports" | "requests" | "settings";
+  "pos" | "stock" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
 const emptyState: AppState = {
   authenticated: false,
   user: null,
@@ -44,7 +57,32 @@ const emptyState: AppState = {
   offlineUntil: null,
   offlineAllowed: false,
   pendingChanges: 0,
+  capabilities: [],
+  localAccess: {
+    setupRequired: false,
+    authenticated: false,
+    user: null,
+    permissions: [],
+  },
 };
+
+const pagePermission: Record<Page, Permission> = {
+  pos: "POS_SELL",
+  stock: "INVENTORY_VIEW",
+  entries: "STOCK_RECEIVE",
+  gifts: "CUSTOM_ORDERS_VIEW",
+  orders: "ORDERS_VIEW",
+  sales: "INVOICES_VIEW",
+  reports: "REPORTS_VIEW",
+  requests: "CATALOG_REQUEST",
+  team: "USERS_MANAGE",
+  settings: "SETTINGS_MANAGE",
+};
+
+function firstAllowedPage(granted: Permission[]): Page {
+  const preferred: Page[] = ["pos", "gifts", "orders", "stock", "entries", "sales", "reports", "requests", "team", "settings"];
+  return preferred.find((candidate) => granted.includes(pagePermission[candidate])) ?? "pos";
+}
 
 export default function App() {
   const [state, setState] = useState<AppState>(emptyState);
@@ -55,6 +93,8 @@ export default function App() {
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bootError, setBootError] = useState("");
+  const [switchingOperator, setSwitchingOperator] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const language = (settings.language === "ar" ? "ar" : "en") as Language;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
 
@@ -81,6 +121,30 @@ export default function App() {
     void initialize();
   }, []);
   useEffect(() => {
+    if (!state.authenticated || !state.localAccess.authenticated) return;
+    const timer = window.setInterval(() => void refreshState(), 30_000);
+    let lastTouch = 0;
+    const touch = () => {
+      if (Date.now() - lastTouch < 30_000) return;
+      lastTouch = Date.now();
+      void window.pos.localTouch().catch(() => void refreshState());
+    };
+    window.addEventListener("pointerdown", touch);
+    window.addEventListener("keydown", touch);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("pointerdown", touch);
+      window.removeEventListener("keydown", touch);
+    };
+  }, [state.authenticated, state.localAccess.authenticated]);
+  useEffect(() => {
+    if (
+      state.localAccess.authenticated &&
+      !state.localAccess.permissions.includes(pagePermission[page])
+    )
+      setPage(firstAllowedPage(state.localAccess.permissions));
+  }, [page, state.localAccess.authenticated, state.localAccess.permissions]);
+  useEffect(() => {
     const theme = settings.theme || "system";
     const media = matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
@@ -97,12 +161,24 @@ export default function App() {
     document.documentElement.lang = settings.language || "en";
     return () => media.removeEventListener("change", applyTheme);
   }, [settings.theme, settings.primaryColor, settings.language]);
+  useEffect(() => {
+    if (!shortcutsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setShortcutsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [shortcutsOpen]);
 
   async function sync() {
     setBusy(true);
     setNotice("");
     try {
-      setState((await window.pos.sync()) as AppState);
+      const synced = (await window.pos.sync()) as Partial<AppState>;
+      // Sync refreshes server data; the local operator session stays active.
+      setState((current) => ({ ...current, ...synced, localAccess: current.localAccess }));
       setNotice(t("everythingUpToDate"));
     } catch (error) {
       setNotice(localizeError(language, error));
@@ -130,6 +206,22 @@ export default function App() {
         ...current,
         sidebarCollapsed: String(!next),
       }));
+    }
+  }
+
+  async function logout() {
+    if (!window.confirm(t("logoutConfirm"))) return;
+    setBusy(true);
+    try {
+      await window.pos.signOut();
+      setSwitchingOperator(false);
+      setState(emptyState);
+      setPage("pos");
+      setNotice("");
+    } catch (value) {
+      setNotice(localizeError(language, value));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -171,21 +263,133 @@ export default function App() {
       </I18nProvider>
     );
 
+  if (!state.localAccess.authenticated)
+    return (
+      <I18nProvider language={language}>
+        <LocalAccessScreen
+          setupRequired={state.localAccess.setupRequired}
+          onSuccess={(value) => {
+            const next = value as AppState;
+            setState(next);
+            setPage(firstAllowedPage(next.localAccess.permissions));
+          }}
+        />
+      </I18nProvider>
+    );
+
+  const can = (permission: Permission) =>
+    state.localAccess.permissions.includes(permission);
+
   const navigation = [
-    { id: "pos", label: t("sell"), icon: ShoppingBag },
-    { id: "stock", label: t("inventory"), icon: Boxes },
-    { id: "orders", label: t("orders"), icon: FileClock },
-    { id: "sales", label: t("sales"), icon: ReceiptText },
-    { id: "reports", label: t("reports"), icon: BarChart3 },
-    { id: "requests", label: t("requests"), icon: PackagePlus },
-    { id: "settings", label: t("settings"), icon: Settings },
-  ] as const;
+    { id: "pos", label: t("sell"), icon: ShoppingBag, permission: "POS_SELL" },
+    { id: "stock", label: t("inventory"), icon: Boxes, permission: "INVENTORY_VIEW" },
+    { id: "entries", label: t("stockEntries"), icon: PackagePlus, permission: "STOCK_RECEIVE" },
+    ...(state.capabilities.includes("CUSTOM_ORDERS") ? [{ id: "gifts" as const, label: t("customOrders"), icon: Gift, permission: "CUSTOM_ORDERS_VIEW" as const }] : []),
+    { id: "orders", label: t("orders"), icon: FileClock, permission: "ORDERS_VIEW" },
+    { id: "sales", label: t("invoices"), icon: ReceiptText, permission: "INVOICES_VIEW" },
+    { id: "reports", label: t("reports"), icon: BarChart3, permission: "REPORTS_VIEW" },
+    { id: "requests", label: t("requests"), icon: PackagePlus, permission: "CATALOG_REQUEST" },
+    { id: "team", label: t("team"), icon: UsersRound, permission: "USERS_MANAGE" },
+    { id: "settings", label: t("settings"), icon: Settings, permission: "SETTINGS_MANAGE" },
+  ].filter((item) => can(item.permission as Permission)) as Array<{ id: Page; label: string; icon: typeof ShoppingBag; permission: string }>;
+
+  const navigationKeys: Partial<Record<Page, string>> = {
+    pos: "1",
+    stock: "2",
+    entries: "3",
+    gifts: "4",
+    orders: "5",
+    sales: "6",
+    reports: "7",
+    requests: "8",
+    settings: "9",
+    team: "0",
+  };
+  const openPage = (target: Page) => {
+    if (navigation.some((item) => item.id === target)) setPage(target);
+  };
+  const focusPageSearch = () => {
+    const input = document.querySelector<HTMLInputElement>(
+      "[data-keyboard-search]:not([disabled])",
+    );
+    input?.focus();
+    input?.select();
+  };
+  const shortcuts: KeyboardShortcut[] = [
+    ...navigation.flatMap((item) => {
+      const key = navigationKeys[item.id];
+      return key
+        ? [{
+          id: `page-${item.id}`,
+          key,
+          alt: true,
+          allowInField: true,
+          run: () => openPage(item.id),
+        }]
+        : [];
+    }),
+    {
+      id: "search",
+      key: "k",
+      primary: true,
+      allowInField: true,
+      run: focusPageSearch,
+    },
+    {
+      id: "search-f2",
+      key: "F2",
+      allowInField: true,
+      run: focusPageSearch,
+    },
+    {
+      id: "sync",
+      key: "s",
+      primary: true,
+      shift: true,
+      allowInField: true,
+      enabled: can("SYNC_MANAGE"),
+      run: () => void sync(),
+    },
+    {
+      id: "settings",
+      key: ",",
+      primary: true,
+      allowInField: true,
+      enabled: can("SETTINGS_MANAGE"),
+      run: () => openPage("settings"),
+    },
+    {
+      id: "operator",
+      key: "l",
+      primary: true,
+      shift: true,
+      allowInField: true,
+      run: () => setSwitchingOperator(true),
+    },
+    {
+      id: "sidebar",
+      key: "b",
+      primary: true,
+      allowInField: true,
+      run: () => void toggleSidebar(),
+    },
+    {
+      id: "help",
+      key: "F1",
+      allowInField: true,
+      run: () => setShortcutsOpen(true),
+    },
+  ];
 
   return (
     <I18nProvider language={language}>
       <div
         className={`shell ${page === "pos" ? "pos-mode" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
       >
+        <KeyboardShortcuts
+          shortcuts={shortcuts}
+          active={!switchingOperator && !shortcutsOpen}
+        />
         <aside className="sidebar">
           <button
             type="button"
@@ -217,9 +421,15 @@ export default function App() {
                 key={item.id}
                 className={page === item.id ? "active" : ""}
                 onClick={() => setPage(item.id)}
-                title={sidebarCollapsed ? item.label : undefined}
+                title={`${item.label}${navigationKeys[item.id] ? ` (Alt+${navigationKeys[item.id]})` : ""}`}
+                aria-keyshortcuts={navigationKeys[item.id] ? `Alt+${navigationKeys[item.id]}` : undefined}
               >
                 <item.icon /> <span>{item.label}</span>
+                {navigationKeys[item.id] ? (
+                  <kbd className="nav-shortcut">
+                    Alt+{navigationKeys[item.id]}
+                  </kbd>
+                ) : null}
                 {item.id === "orders" && <i />}
               </button>
             ))}
@@ -238,11 +448,18 @@ export default function App() {
             </div>
             <button
               className="icon-button"
+              aria-label={t("switchOperator")}
+              onClick={() => setSwitchingOperator(true)}
+              title={t("switchOperator")}
+            >
+              <UserRoundCog />
+            </button>
+            <button
+              className="icon-button logout-button"
               aria-label={t("signOut")}
-              onClick={async () => {
-                await window.pos.signOut();
-                setState(emptyState);
-              }}
+              onClick={() => void logout()}
+              title={t("signOut")}
+              disabled={busy}
             >
               <LogOut />
             </button>
@@ -268,12 +485,22 @@ export default function App() {
                 </span>
               </div>
               <button
+                className="icon-button keyboard-button"
+                type="button"
+                aria-label={t("keyboardShortcuts")}
+                aria-keyshortcuts="F1"
+                title={`${t("keyboardShortcuts")} (F1)`}
+                onClick={() => setShortcutsOpen(true)}
+              >
+                <Keyboard />
+              </button>
+              {can("SYNC_MANAGE") ? <button
                 className="button secondary"
                 onClick={sync}
                 disabled={busy}
               >
                 <RefreshCw className={busy ? "spin" : ""} /> {t("sync")}
-              </button>
+              </button> : null}
             </div>
           </header>
           {notice && (
@@ -287,14 +514,17 @@ export default function App() {
               <PosScreen onNotice={setNotice} onChanged={refreshState} />
             )}
             {page === "stock" && <InventoryScreen onNotice={setNotice} />}
+            {page === "entries" && <StockEntriesScreen onNotice={setNotice} settings={settings} />}
+            {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} />}
             {page === "orders" && <OrdersScreen />}
             {page === "sales" && (
-              <SalesScreen onNotice={setNotice} settings={settings} />
+              <InvoicesScreen onNotice={setNotice} settings={settings} />
             )}
             {page === "reports" && <ReportsScreen onNotice={setNotice} />}
             {page === "requests" && (
               <CatalogRequestsScreen onNotice={setNotice} />
             )}
+            {page === "team" && <TeamScreen onNotice={setNotice} />}
             {page === "settings" && (
               <SettingsScreen
                 values={settings}
@@ -304,8 +534,123 @@ export default function App() {
             )}
           </section>
         </main>
+        {switchingOperator ? (
+          <div className="operator-switch-layer">
+            <LocalAccessScreen
+              setupRequired={false}
+              canGoBack
+              onBack={() => setSwitchingOperator(false)}
+              onLock={async () => {
+                await window.pos.localLogout();
+                setSwitchingOperator(false);
+                await refreshState();
+              }}
+              onSuccess={(value) => {
+                const next = value as AppState;
+                setState(next);
+                setPage(firstAllowedPage(next.localAccess.permissions));
+                setSwitchingOperator(false);
+              }}
+            />
+          </div>
+        ) : null}
+        {shortcutsOpen ? (
+          <div
+            className="modal-backdrop"
+            onMouseDown={(event) =>
+              event.target === event.currentTarget && setShortcutsOpen(false)
+            }
+          >
+            <section
+              className="modal-card shortcuts-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="keyboard-shortcuts-title"
+            >
+              <div className="dialog-heading">
+                <div>
+                  <p className="eyebrow">Shea POS</p>
+                  <h2 id="keyboard-shortcuts-title">
+                    {t("keyboardShortcuts")}
+                  </h2>
+                  <p>{t("keyboardShortcutsText")}</p>
+                </div>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={() => setShortcutsOpen(false)}
+                  aria-label={t("close")}
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
+              </div>
+              <div className="shortcut-groups">
+                <ShortcutGroup
+                  title={t("navigationShortcuts")}
+                  rows={navigation
+                    .filter((item) => navigationKeys[item.id])
+                    .map((item) => ({
+                      label: item.label,
+                      keys: ["Alt", navigationKeys[item.id]!],
+                    }))}
+                />
+                <ShortcutGroup
+                  title={t("actionShortcuts")}
+                  rows={[
+                    { label: t("focusSearch"), keys: ["Ctrl", "K"] },
+                    { label: t("focusSearch"), keys: ["F2"] },
+                    ...(can("SYNC_MANAGE")
+                      ? [{ label: t("sync"), keys: ["Ctrl", "Shift", "S"] }]
+                      : []),
+                    ...(can("SETTINGS_MANAGE")
+                      ? [{ label: t("settings"), keys: ["Ctrl", ","] }]
+                      : []),
+                    {
+                      label: t("switchOperator"),
+                      keys: ["Ctrl", "Shift", "L"],
+                    },
+                    {
+                      label: sidebarCollapsed
+                        ? t("expandSidebar")
+                        : t("collapseSidebar"),
+                      keys: ["Ctrl", "B"],
+                    },
+                    { label: t("keyboardShortcuts"), keys: ["F1"] },
+                  ]}
+                />
+              </div>
+            </section>
+          </div>
+        ) : null}
       </div>
     </I18nProvider>
+  );
+}
+
+function ShortcutGroup({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: Array<{ label: string; keys: string[] }>;
+}) {
+  return (
+    <section className="shortcut-group">
+      <h3>{title}</h3>
+      {rows.map((row) => (
+        <div
+          className="shortcut-row"
+          key={`${row.label}-${row.keys.join("-")}`}
+        >
+          <span>{row.label}</span>
+          <span>
+            {row.keys.map((key) => (
+              <kbd key={key}>{key}</kbd>
+            ))}
+          </span>
+        </div>
+      ))}
+    </section>
   );
 }
 

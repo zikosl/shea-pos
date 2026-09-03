@@ -2,11 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { PosDatabase } from "./database";
 import { graphqlRequest, refreshSession } from "./graphql";
 import { readSession, writeSession, type Session } from "./session";
+import type { ProductAssetService } from "./assets";
 
 export class SyncService {
   private running = false;
 
-  constructor(private readonly database: PosDatabase) {}
+  constructor(
+    private readonly database: PosDatabase,
+    private readonly assets?: ProductAssetService,
+  ) {}
 
   private async activeSession() {
     let session = readSession(this.database);
@@ -84,6 +88,7 @@ export class SyncService {
         result.posBootstrap.cursor,
         result.posBootstrap.offlineUntil,
       );
+      await this.assets?.localizeActiveProducts();
       this.database.setSetting("lastSyncError", "");
       return this.state();
     } catch (error) {
@@ -241,11 +246,61 @@ export class SyncService {
             {
               ...payload,
               id: payload.serverId,
-              stock: Math.round(payload.stock),
-              reorderThreshold: Math.round(payload.reorderThreshold ?? 0),
+              stock:
+                payload.stock === undefined
+                  ? undefined
+                  : Math.round(payload.stock),
+              reorderThreshold:
+                payload.reorderThreshold === undefined
+                  ? undefined
+                  : Math.round(payload.reorderThreshold),
             },
             session.accessToken,
           );
+        } else if (row.operation === "CREATE_CUSTOM_ORDER") {
+          const { targetStatus, ...input } = payload;
+          const selection = `id orderNumber nicheId customerName customerPhone status requiredAt fulfillmentMode deliveryAddress note subtotal discount total version createdAt updatedAt gift { occasion recipientName cardMessage style wrappingNote } lines { id productId name description quantity unitPrice unitCost total sortOrder } tasks { id title status dueAt sortOrder }`;
+          let data = await graphqlRequest<{ createGiftOrder: any }>(
+            session.endpoint,
+            `mutation CreateCustomOrder($input: CreateGiftOrderInput!) { createGiftOrder(input: $input) { ${selection} } }`,
+            { input },
+            session.accessToken,
+          );
+          let order = data.createGiftOrder;
+          if (targetStatus && targetStatus !== "DRAFT") {
+            const transitioned = await graphqlRequest<{ transitionGiftOrder: any }>(
+              session.endpoint,
+              `mutation TransitionNewCustomOrder($id: String!, $status: CustomOrderStatus!, $expectedVersion: Int!) { transitionGiftOrder(id: $id, status: $status, expectedVersion: $expectedVersion) { ${selection} } }`,
+              { id: order.id, status: targetStatus, expectedVersion: order.version },
+              session.accessToken,
+            );
+            order = transitioned.transitionGiftOrder;
+          }
+          this.database.markCustomOrderCreated(row.aggregate_id, order);
+        } else if (row.operation === "TRANSITION_CUSTOM_ORDER") {
+          const data = await graphqlRequest<{ transitionGiftOrder: any }>(
+            session.endpoint,
+            `mutation TransitionCustomOrder($id: String!, $status: CustomOrderStatus!, $expectedVersion: Int!) { transitionGiftOrder(id: $id, status: $status, expectedVersion: $expectedVersion) { id orderNumber customerName status requiredAt fulfillmentMode total version updatedAt } }`,
+            { id: payload.serverId, status: payload.status, expectedVersion: payload.expectedVersion },
+            session.accessToken,
+          );
+          this.database.markCustomOrderTransitioned(row.aggregate_id, data.transitionGiftOrder);
+        } else if (row.operation === "CREATE_CUSTOM_ORDER_QUOTATION") {
+          await graphqlRequest(
+            session.endpoint,
+            `mutation CreateCustomOrderQuotation($id: String!) { createGiftQuotation(customOrderId: $id) { id quoteNumber status total version } }`,
+            { id: payload.serverId },
+            session.accessToken,
+          );
+          this.database.markCustomOrderCommandSynced(row.aggregate_id);
+        } else if (row.operation === "RESERVE_CUSTOM_ORDER_MATERIALS") {
+          const data = await graphqlRequest<{ reserveGiftMaterials: any }>(
+            session.endpoint,
+            `mutation ReserveCustomOrderMaterials($id: String!) { reserveGiftMaterials(customOrderId: $id) { id status version updatedAt } }`,
+            { id: payload.serverId },
+            session.accessToken,
+          );
+          this.database.markCustomOrderTransitioned(row.aggregate_id, data.reserveGiftMaterials);
         }
         this.database.markOutboxSynced(row.id);
       } catch (error) {
@@ -270,6 +325,7 @@ export class SyncService {
       offlineUntil: session?.offlineUntil || null,
       offlineAllowed: this.isLeaseValid(session),
       pendingChanges: this.database.countPendingOutbox(),
+      capabilities: settings.capabilities ? JSON.parse(settings.capabilities) : [],
     };
   }
 
