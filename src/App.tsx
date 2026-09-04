@@ -46,6 +46,7 @@ import {
   type KeyboardShortcut,
 } from "./components/KeyboardShortcuts";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
+import { DeploymentSetupScreen } from "./features/setup/DeploymentSetupScreen";
 
 type Page =
   "pos" | "stock" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
@@ -262,6 +263,12 @@ export default function App() {
             onRetry={() => void initialize()}
           />
         </Centered>
+      </I18nProvider>
+    );
+  if (settings.deploymentConfigured !== "true")
+    return (
+      <I18nProvider language={language}>
+        <DeploymentSetupScreen onComplete={setSettings} />
       </I18nProvider>
     );
   if (!state.authenticated)

@@ -12,6 +12,13 @@ const api: PosApi = {
     return () => ipcRenderer.removeListener("pos:update-status", handler);
   },
   getState: () => ipcRenderer.invoke("pos:get-state"),
+  copyText: (value) => ipcRenderer.invoke("pos:copy-text", value),
+  getGatewayStatus: () => ipcRenderer.invoke("pos:get-gateway-status"),
+  configureDeployment: (input) => ipcRenderer.invoke("pos:configure-deployment", input),
+  getStoreNetwork: () => ipcRenderer.invoke("pos:get-store-network"),
+  provisionStoreGateway: (input) => ipcRenderer.invoke("pos:provision-store-gateway", input),
+  pairGateway: (input) => ipcRenderer.invoke("pos:pair-gateway", input),
+  disconnectGateway: () => ipcRenderer.invoke("pos:disconnect-gateway"),
   signIn: (input) => ipcRenderer.invoke("pos:sign-in", input),
   signOut: () => ipcRenderer.invoke("pos:sign-out"),
   setupLocalOwner: (input) => ipcRenderer.invoke("pos:setup-local-owner", input),

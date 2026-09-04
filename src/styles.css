@@ -3985,6 +3985,100 @@ textarea:focus-visible {
   gap: 14px;
 }
 
+.gateway-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-subtle);
+}
+
+.gateway-status.connected {
+  border-color: color-mix(in srgb, #2f9e73 42%, var(--border));
+}
+
+.gateway-status.disconnected {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+}
+
+.gateway-status svg {
+  flex: 0 0 20px;
+  width: 20px;
+}
+
+.gateway-status strong,
+.gateway-status p {
+  margin: 0;
+}
+
+.gateway-status p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gateway-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.gateway-provision {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.gateway-provision strong,
+.gateway-provision p {
+  margin: 0;
+}
+
+.gateway-prerequisite {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+}
+
+.gateway-prerequisite svg {
+  width: 19px;
+  flex: 0 0 19px;
+  color: var(--warning);
+}
+
+.gateway-provision p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gateway-credential {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+  border-radius: 14px;
+  background: var(--primary-soft);
+}
+
+.gateway-credential code {
+  padding: 10px;
+  overflow-wrap: anywhere;
+  border-radius: 10px;
+  background: var(--surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  direction: ltr;
+  text-align: left;
+}
+
 .settings-section .section-title {
   display: flex;
   align-items: flex-start;
@@ -5094,4 +5188,45 @@ body *::after {
     min-width: 0;
     flex: 1 1 0;
   }
+}
+/* First-run deployment choice keeps infrastructure decisions explicit and reversible. */
+.deployment-setup {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 15% 20%, color-mix(in srgb, var(--primary) 20%, transparent), transparent 32%),
+    radial-gradient(circle at 88% 82%, color-mix(in srgb, var(--primary) 12%, transparent), transparent 28%),
+    var(--background);
+}
+
+.deployment-card {
+  width: min(720px, 100%);
+  display: grid;
+  gap: 20px;
+  padding: clamp(28px, 5vw, 52px);
+  border: 1px solid var(--border);
+  border-radius: 28px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 28px 80px color-mix(in srgb, #000 22%, transparent);
+}
+
+.deployment-card h1 { margin: 0; font-size: clamp(30px, 4vw, 46px); letter-spacing: -0.04em; }
+.deployment-intro { margin: -10px 0 4px; color: var(--muted); font-size: 17px; }
+.deployment-mark { width: 54px; height: 54px; display: grid; place-items: center; border-radius: 17px; color: white; background: var(--primary); }
+.deployment-mark svg { width: 25px; height: 25px; }
+.deployment-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.deployment-option { min-height: 138px; display: flex; align-items: flex-start; gap: 14px; padding: 22px; text-align: start; color: var(--text); border: 1px solid var(--border); border-radius: 20px; background: var(--surface-soft); cursor: pointer; transition: border-color 160ms ease, transform 160ms ease, background 160ms ease; }
+.deployment-option:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); }
+.deployment-option.selected { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, var(--surface)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent); }
+.deployment-option svg { width: 24px; height: 24px; color: var(--primary); flex: none; }
+.deployment-option span { display: grid; gap: 7px; }
+.deployment-option strong { font-size: 17px; }
+.deployment-option small, .deployment-card > small { color: var(--muted); line-height: 1.5; }
+
+@media (max-width: 640px) {
+  .deployment-setup { padding: 16px; align-items: start; }
+  .deployment-card { padding: 26px 20px; border-radius: 22px; }
+  .deployment-options { grid-template-columns: 1fr; }
 }

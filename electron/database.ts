@@ -43,6 +43,13 @@ export class PosDatabase {
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("busy_timeout = 5000");
     this.migrate();
+
+    // Existing activated installations predate deployment-mode onboarding.
+    // Keep their current mode and reserve the setup screen for fresh databases.
+    if (this.getSetting("device") && !this.getSetting("deploymentConfigured")) {
+      if (!this.getSetting("deploymentMode")) this.setSetting("deploymentMode", "solo");
+      this.setSetting("deploymentConfigured", "true");
+    }
   }
 
   private migrate() {
@@ -1071,7 +1078,7 @@ export class PosDatabase {
           `INSERT INTO stock_movements(id,product_local_id,stock_entry_id,type,quantity_delta,stock_before,stock_after,reason,sync_state,created_at)
            VALUES (?,?,?,'RECEIPT',?,?,?,?, 'PENDING',?)`,
         ).run(randomUUID(), product.local_id, id, line.quantity, product.stock, nextStock, entryNumber, now);
-        if (product.server_id) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
+        if (product.server_id && !input.gatewayCommitted) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
           serverId: product.server_id,
           stock: nextStock,
           costPrice: nextCost,
@@ -1082,7 +1089,7 @@ export class PosDatabase {
       return this.getStockEntry(id);
     })();
   }
-  cancelStockEntry(id: string) {
+  cancelStockEntry(id: string, gatewayCommitted = false) {
     return this.db.transaction(() => {
       const record = this.getStockEntry(id) as any;
       if (record.entry.status !== "POSTED") throw new Error("Only posted entries can be cancelled");
@@ -1100,7 +1107,7 @@ export class PosDatabase {
           `INSERT INTO stock_movements(id,product_local_id,stock_entry_id,type,quantity_delta,stock_before,stock_after,reason,sync_state,created_at)
            VALUES (?,?,?,'REMOVAL',?,?,?,?, 'PENDING',?)`,
         ).run(randomUUID(), product.local_id, id, -Number(item.quantity), product.stock, nextStock, `CANCEL ${record.entry.entry_number}`, now);
-        if (product.server_id) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
+        if (product.server_id && !gatewayCommitted) this.enqueue("UPDATE_PRODUCT", "Product", product.local_id, {
           serverId: product.server_id,
           stock: nextStock,
           costPrice: nextCost,
@@ -1348,10 +1355,10 @@ export class PosDatabase {
     if (input.paymentMethod === "CASH" && !this.getCashSession())
       throw new Error("Open the register before accepting cash");
     return this.db.transaction(() => {
-      const saleId = randomUUID();
+      const saleId = input.transactionId ?? randomUUID();
       const createdAt = new Date().toISOString();
       const device = JSON.parse(this.getSetting("device") ?? "{}");
-      const saleNumber = `POS-${device.id?.slice(0, 6) ?? "LOCAL"}-${Date.now()}`;
+      const saleNumber = input.saleNumber ?? `POS-${device.id?.slice(0, 6) ?? "LOCAL"}-${Date.now()}`;
       const snapshots: any[] = [];
       for (const line of input.lines) {
         const product = this.db
@@ -1389,11 +1396,12 @@ export class PosDatabase {
       this.db
         .prepare(
           `INSERT INTO sales(id,sale_number,status,customer_name,note,subtotal,discount_total,tax_total,total,cost_total,gross_profit,partner_fee,net_profit,payment_method,amount_tendered,change_due,sync_state,created_at,operator_id,operator_name)
-        VALUES (?,?, 'COMPLETED',?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)`,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           saleId,
           saleNumber,
+          "COMPLETED",
           input.customerName ?? null,
           input.note ?? null,
           subtotal,
@@ -1407,6 +1415,7 @@ export class PosDatabase {
           input.paymentMethod,
           tendered,
           changeDue,
+          input.gatewayCommitted ? "SYNCED" : "PENDING",
           createdAt,
           input.operatorId ?? null,
           input.operatorName ?? null,
@@ -1463,23 +1472,24 @@ export class PosDatabase {
         .prepare("SELECT * FROM sale_items WHERE sale_id=?")
         .all(saleId);
       const blocked = items.some((item: any) => !item.product_server_id);
-      this.enqueue(
-        "CREATE_SALE",
-        "Sale",
-        saleId,
-        {
+      if (!input.gatewayCommitted)
+        this.enqueue(
+          "CREATE_SALE",
+          "Sale",
           saleId,
-          saleNumber,
-          customerName: input.customerName,
-          note: input.note,
-          discountTotal,
-          taxTotal,
-          total,
-          paymentMethod: input.paymentMethod,
-          items,
-        },
-        blocked ? "BLOCKED" : "PENDING",
-      );
+          {
+            saleId,
+            saleNumber,
+            customerName: input.customerName,
+            note: input.note,
+            discountTotal,
+            taxTotal,
+            total,
+            paymentMethod: input.paymentMethod,
+            items,
+          },
+          blocked ? "BLOCKED" : "PENDING",
+        );
       if (input.paymentMethod === "CASH")
         this.db
           .prepare(
@@ -1495,11 +1505,77 @@ export class PosDatabase {
     })();
   }
 
+  gatewaySaleLines(lines: CheckoutInput["lines"]) {
+    return lines.map((line) => {
+      const product = this.db
+        .prepare("SELECT server_id,price FROM products WHERE local_id=? AND active=1")
+        .get(line.productLocalId) as { server_id?: number; price: number } | undefined;
+      if (!product?.server_id) throw new Error("Synchronize products before using multi-POS mode");
+      return {
+        productId: product.server_id,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice ?? product.price,
+        discount: line.discount ?? 0,
+        tax: 0,
+      };
+    });
+  }
+
+  gatewayProduct(localId: string) {
+    const product = this.db
+      .prepare("SELECT server_id FROM products WHERE local_id=? AND active=1")
+      .get(localId) as { server_id?: number } | undefined;
+    if (!product?.server_id) throw new Error("Synchronize products before using multi-POS mode");
+    return { serverId: product.server_id };
+  }
+
+  gatewayStockEntryLines(input: CreateStockEntryInput) {
+    return input.lines.map((line) => ({
+      productLocalId: line.productLocalId,
+      quantity: line.quantity,
+      unitCost: line.pricingMode === "TOTAL" ? line.price / line.quantity : line.price,
+    }));
+  }
+
+  gatewayStockEntryCancellation(id: string) {
+    const record = this.getStockEntry(id) as any;
+    return {
+      reference: record.entry.entry_number,
+      lines: record.items.map((item: any) => ({
+        productLocalId: item.product_local_id,
+        quantity: Number(item.quantity),
+        unitCost: Number(item.unit_cost),
+      })),
+    };
+  }
+
+  applyGatewayProducts(products: Array<Record<string, unknown>>) {
+    const update = this.db.prepare(
+      `UPDATE products SET stock=@stock,price=@price,cost_price=@costPrice,discount=@discount,
+       reorder_threshold=@reorderThreshold,available=@available,visible_in_pos=@visibleInPos,
+       updated_at=CURRENT_TIMESTAMP WHERE server_id=@cloudId`,
+    );
+    this.db.transaction(() => {
+      for (const product of products)
+        update.run({
+          cloudId: product.cloudId,
+          stock: product.stock,
+          price: product.price,
+          costPrice: product.costPrice,
+          discount: product.discount,
+          reorderThreshold: product.reorderThreshold,
+          available: product.available ? 1 : 0,
+          visibleInPos: product.visibleInPos ? 1 : 0,
+        });
+    })();
+  }
+
   adjustStock(input: {
     productLocalId: string;
     mode: "RECEIVE" | "REMOVE" | "SET";
     quantity: number;
     reason: string;
+    gatewayCommitted?: boolean;
   }) {
     if (!Number.isFinite(input.quantity) || input.quantity < 0)
       throw new Error("Stock must be zero or greater");
@@ -1543,7 +1619,7 @@ export class PosDatabase {
           input.reason,
           new Date().toISOString(),
         );
-      if (product.server_id)
+      if (product.server_id && !input.gatewayCommitted)
         this.enqueue("UPDATE_STOCK", "Product", input.productLocalId, {
           serverId: product.server_id,
           stock: nextStock,
@@ -1565,6 +1641,7 @@ export class PosDatabase {
     available?: boolean;
     visibleInPos?: boolean;
     active?: boolean;
+    gatewayCommitted?: boolean;
   }) {
     return this.db.transaction(() => {
       const product = this.db
@@ -1633,7 +1710,7 @@ export class PosDatabase {
             new Date().toISOString(),
           );
       }
-      if (product.server_id)
+      if (product.server_id && !input.gatewayCommitted)
         this.enqueue("UPDATE_PRODUCT", "Product", input.productLocalId, {
           serverId: product.server_id,
           price: next.price,

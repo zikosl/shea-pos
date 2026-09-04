@@ -6,6 +6,10 @@ import {
   Printer,
   RefreshCw,
   ScanBarcode,
+  Network,
+  ShieldCheck,
+  TriangleAlert,
+  Unplug,
   SlidersHorizontal,
 } from "lucide-react";
 import { localizeError, useI18n } from "../../i18n";
@@ -13,6 +17,14 @@ import { LoadingState } from "../../components/AsyncState";
 import { PageHeader } from "../../components/PageHeader";
 
 type PrintTab = "receipt" | "label";
+
+type StoreNetwork = {
+  id: string;
+  name: string;
+  cloudSyncEnabled: boolean;
+  cloudGatewayUrl?: string;
+  localGatewayUrl?: string;
+};
 
 const defaults: Record<string, string> = {
   theme: "system",
@@ -30,6 +42,8 @@ const defaults: Record<string, string> = {
   labelShowSku: "true",
   labelShowBarcode: "true",
   localSessionTimeout: "15",
+  deploymentMode: "solo",
+  gatewayUrl: "http://127.0.0.1:3510",
 };
 
 export function SettingsScreen({
@@ -50,6 +64,12 @@ export function SettingsScreen({
   const [loadingPrinters, setLoadingPrinters] = useState(true);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [gatewayStatus, setGatewayStatus] = useState<any>(null);
+  const [gatewayBusy, setGatewayBusy] = useState(false);
+  const [pairingCode, setPairingCode] = useState("");
+  const [stores, setStores] = useState<StoreNetwork[]>([]);
+  const [selectedStoreId, setSelectedStoreId] = useState("");
+  const [gatewayCredential, setGatewayCredential] = useState<any>(null);
 
   useEffect(() => setDraft({ ...defaults, ...values }), [values]);
 
@@ -63,6 +83,25 @@ export function SettingsScreen({
   }
 
   useEffect(loadPrinters, []);
+
+  function loadGatewayStatus() {
+    void window.pos.getGatewayStatus().then(setGatewayStatus).catch(() => setGatewayStatus(null));
+  }
+
+  useEffect(loadGatewayStatus, [values.deploymentMode, values.gatewayUrl]);
+
+  function applyStoreNetwork(rows: StoreNetwork[]) {
+      setStores(rows);
+      setSelectedStoreId((current) => rows.some((store) => store.id === current) ? current : rows[0]?.id || "");
+      const suggestedGatewayUrl = rows[0]?.localGatewayUrl;
+      if (suggestedGatewayUrl && values.deploymentMode !== "multi") {
+        setDraft((current) => ({ ...current, gatewayUrl: suggestedGatewayUrl }));
+      }
+  }
+
+  useEffect(() => {
+    void window.pos.getStoreNetwork().then((rows) => applyStoreNetwork(rows as StoreNetwork[])).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let current = true;
@@ -136,6 +175,71 @@ export function SettingsScreen({
     }
   }
 
+  async function pairGateway() {
+    setGatewayBusy(true);
+    try {
+      const status = await window.pos.pairGateway({
+        url: draft.gatewayUrl,
+        pairingCode,
+        name: draft.storeName || "Shea POS",
+      });
+      setPairingCode("");
+      const next = await window.pos.updateSettings({ deploymentMode: "multi", gatewayUrl: draft.gatewayUrl });
+      setDraft({ ...defaults, ...next });
+      onChange(next);
+      setGatewayStatus(status);
+      onNotice(t("gatewayPaired"));
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    } finally {
+      setGatewayBusy(false);
+    }
+  }
+
+  async function disconnectGateway() {
+    setGatewayBusy(true);
+    try {
+      await window.pos.disconnectGateway();
+      const next = await window.pos.updateSettings({ deploymentMode: "solo" });
+      setDraft({ ...defaults, ...next });
+      onChange(next);
+      setGatewayStatus({ mode: "solo", connected: true });
+      onNotice(t("gatewayDisconnected"));
+    } finally {
+      setGatewayBusy(false);
+    }
+  }
+
+  async function provisionGateway() {
+    if (!selectedStoreId) return;
+    setGatewayBusy(true);
+    try {
+      const latest = await window.pos.getStoreNetwork() as StoreNetwork[];
+      applyStoreNetwork(latest);
+      const store = latest.find((item) => item.id === selectedStoreId) ?? latest[0];
+      if (!store?.cloudSyncEnabled || !store.cloudGatewayUrl) {
+        onNotice(t("cloudGatewayNotConfigured"));
+        return;
+      }
+      const credential = await window.pos.provisionStoreGateway({ storeId: store.id });
+      setGatewayCredential(credential);
+      onNotice(t("gatewayCredentialCreated"));
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    } finally {
+      setGatewayBusy(false);
+    }
+  }
+
+  async function copyGatewayCredential() {
+    if (!gatewayCredential) return;
+    await window.pos.copyText(`STORE_ID=${gatewayCredential.storeId}\nCLOUD_GATEWAY_URL=${gatewayCredential.cloudGatewayUrl}\nGATEWAY_TOKEN=${gatewayCredential.token}`);
+    onNotice(t("gatewayCredentialCopied"));
+  }
+
+  const selectedStore = stores.find((store) => store.id === selectedStoreId);
+  const cloudProvisioningReady = Boolean(selectedStore?.cloudSyncEnabled && selectedStore.cloudGatewayUrl);
+
   return (
     <form className="page-stack settings-form" onSubmit={save}>
       <PageHeader
@@ -198,6 +302,77 @@ export function SettingsScreen({
               {draft.storeLogo ? <button type="button" className="button secondary" onClick={() => change("storeLogo", "", true)}>{t("removeLogo")}</button> : null}
             </div>
           </label>
+        </section>
+
+        <section className="panel settings-section gateway-settings">
+          <div className="section-title">
+            <div className="section-icon"><Network /></div>
+            <div><h3>{t("storeNetwork")}</h3><p>{t("storeNetworkHelp")}</p></div>
+          </div>
+          <div className={`gateway-status ${gatewayStatus?.connected ? "connected" : "disconnected"}`}>
+            {gatewayStatus?.connected ? <ShieldCheck /> : <Unplug />}
+            <div>
+              <strong>{draft.deploymentMode === "multi" ? t(gatewayStatus?.connected ? "gatewayConnected" : "gatewayUnavailable") : t("soloMode")}</strong>
+              <p>{draft.deploymentMode === "multi" ? (gatewayStatus?.error || t("multiPosModeHelp")) : t("soloModeHelp")}</p>
+            </div>
+          </div>
+          <label>
+            {t("gatewayAddress")}
+            <input
+              value={draft.gatewayUrl}
+              disabled={draft.deploymentMode === "multi" && gatewayStatus?.connected}
+              placeholder="http://192.168.1.10:3510"
+              onChange={(event) => change("gatewayUrl", event.target.value)}
+            />
+          </label>
+          {draft.deploymentMode !== "multi" || !gatewayStatus?.connected ? (
+            <label>
+              {t("pairingCode")}
+              <input type="password" autoComplete="one-time-code" value={pairingCode} onChange={(event) => setPairingCode(event.target.value)} />
+            </label>
+          ) : null}
+          <div className="gateway-actions">
+            {draft.deploymentMode === "multi" && gatewayStatus?.connected ? (
+              <button type="button" className="button secondary" disabled={gatewayBusy} onClick={disconnectGateway}><Unplug />{t("useSoloMode")}</button>
+            ) : (
+              <button type="button" className="button secondary" disabled={gatewayBusy || pairingCode.length < 4} onClick={pairGateway}>
+                {gatewayBusy ? <LoaderCircle className="spin" /> : <Network />}{t("pairGateway")}
+              </button>
+            )}
+            <button type="button" className="button ghost" disabled={gatewayBusy} onClick={loadGatewayStatus}><RefreshCw />{t("testConnection")}</button>
+          </div>
+          {draft.deploymentMode !== "multi" || !gatewayStatus?.connected ? (
+            <div className="gateway-provision">
+              <div>
+                <strong>{t("gatewayServerSetup")}</strong>
+                <p>{t("gatewayServerSetupHelp")}</p>
+              </div>
+              {stores.length > 1 ? (
+                <select value={selectedStoreId} onChange={(event) => setSelectedStoreId(event.target.value)}>
+                  {stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}
+                </select>
+              ) : null}
+              {!cloudProvisioningReady ? (
+                <div className="gateway-prerequisite" role="status">
+                  <TriangleAlert />
+                  <div>
+                    <strong>{t("cloudGatewayRequiredTitle")}</strong>
+                    <p>{t("cloudGatewayRequiredHelp")}</p>
+                  </div>
+                </div>
+              ) : null}
+              <button type="button" className="button ghost" disabled={gatewayBusy || !selectedStoreId} onClick={provisionGateway}>
+                {gatewayBusy ? <LoaderCircle className="spin" /> : <ShieldCheck />}{t("generateGatewayCredential")}
+              </button>
+              {gatewayCredential ? (
+                <div className="gateway-credential">
+                  <p>{t("gatewayCredentialWarning")}</p>
+                  <code>STORE_ID={gatewayCredential.storeId}<br />GATEWAY_TOKEN={gatewayCredential.token}</code>
+                  <button type="button" className="button secondary" onClick={copyGatewayCredential}>{t("copyCredential")}</button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         <section className="panel settings-section">

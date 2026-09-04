@@ -26,6 +26,9 @@ export type CheckoutInput = {
     unitPrice?: number;
     discount?: number;
   }>;
+  transactionId?: string;
+  saleNumber?: string;
+  gatewayCommitted?: boolean;
 };
 
 export type ProposalInput = {
@@ -80,6 +83,7 @@ export type CreateStockEntryInput = {
     pricingMode: "UNIT" | "TOTAL";
     price: number;
   }>;
+  gatewayCommitted?: boolean;
 };
 
 export type CreateCustomOrderInput = {
@@ -107,6 +111,13 @@ export type PosApi = {
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (status: import("./updater").UpdateStatus) => void): () => void;
   getState(): Promise<unknown>;
+  copyText(value: string): Promise<void>;
+  getGatewayStatus(): Promise<unknown>;
+  configureDeployment(input: { mode: "solo" | "multi"; gatewayUrl?: string }): Promise<Record<string, string>>;
+  getStoreNetwork(): Promise<unknown[]>;
+  provisionStoreGateway(input: { storeId: string }): Promise<unknown>;
+  pairGateway(input: { url: string; pairingCode: string; name: string }): Promise<unknown>;
+  disconnectGateway(): Promise<void>;
   signIn(input: {
     endpoint: string;
     email: string;

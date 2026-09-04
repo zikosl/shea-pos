@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { app, BrowserWindow, protocol, shell } from "electron";
 import { PosDatabase } from "./database";
@@ -7,6 +8,7 @@ import { SyncService } from "./sync";
 import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
 import { PosUpdater } from "./updater";
+import { GatewayService } from "./gateway";
 
 let mainWindow: BrowserWindow | null = null;
 let database: PosDatabase | null = null;
@@ -36,16 +38,28 @@ function createWindow() {
     },
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://")) void shell.openExternal(url);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" && ["shea.openzey.com", "openzey.com"].includes(parsed.hostname))
+        void shell.openExternal(parsed.toString());
+    } catch {
+      // Ignore malformed or unsupported external URLs.
+    }
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    const allowed =
-      process.env.VITE_DEV_SERVER_URL ??
-      `file://${path.join(__dirname, "../dist/index.html")}`;
-    if (!url.startsWith(allowed)) event.preventDefault();
+    try {
+      if (app.isPackaged) {
+        if (fileURLToPath(new URL(url)) !== path.resolve(__dirname, "../dist/index.html")) event.preventDefault();
+        return;
+      }
+      const devUrl = process.env.VITE_DEV_SERVER_URL;
+      if (!devUrl || new URL(url).origin !== new URL(devUrl).origin) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
   });
-  if (process.env.VITE_DEV_SERVER_URL)
+  if (!app.isPackaged && process.env.VITE_DEV_SERVER_URL)
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   else void mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
   return mainWindow;
@@ -98,6 +112,7 @@ else {
     });
     void assets.initialize();
     const sync = new SyncService(database, assets);
+    const gateway = new GatewayService(database);
     const existingState = sync.state();
     if (
       existingState.authenticated &&
@@ -108,7 +123,7 @@ else {
     const access = new LocalAccessService(database);
     const window = createWindow();
     updater = new PosUpdater(window);
-    registerIpc(database!, sync, access, assets, window, updater);
+    registerIpc(database!, sync, access, assets, window, updater, gateway);
     updater.start();
     syncTimer = setInterval(() => {
       if (sync.state().authenticated) void sync.sync().catch(() => undefined);

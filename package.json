@@ -18,6 +18,7 @@
   "dependencies": {
     "@fontsource/urbanist": "^5.3.0",
     "@fontsource/zain": "^5.3.0",
+    "@zikosl/shea-pos-protocol": "1.0.0",
     "better-sqlite3": "13.0.3",
     "bwip-js": "^4.11.4",
     "electron-updater": "^6.8.9",

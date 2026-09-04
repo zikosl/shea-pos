@@ -1,4 +1,5 @@
-import { BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow, clipboard, ipcMain } from "electron";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { PosDatabase } from "./database";
 import { normalizeEndpoint, signIn } from "./graphql";
@@ -6,6 +7,7 @@ import { clearSession } from "./session";
 import type { SyncService } from "./sync";
 import type { ProductAssetService } from "./assets";
 import type { PosUpdater } from "./updater";
+import type { GatewayService } from "./gateway";
 import {
   permissions,
   rolePermissions,
@@ -238,6 +240,9 @@ const settingKeys = [
   "storeLogo",
   "sidebarCollapsed",
   "localSessionTimeout",
+  "deploymentMode",
+  "deploymentConfigured",
+  "gatewayUrl",
 ] as const;
 
 export function registerIpc(
@@ -247,6 +252,7 @@ export function registerIpc(
   assets: ProductAssetService,
   mainWindow: BrowserWindow,
   updater: PosUpdater,
+  gateway: GatewayService,
 ) {
   const state = () => ({ ...sync.state(), localAccess: access.state() });
   const requireCapability = (capability: string) => {
@@ -265,6 +271,22 @@ export function registerIpc(
     return result;
   });
   handle("pos:get-state", state);
+  handle("pos:copy-text", (raw) => clipboard.writeText(z.string().max(10_000).parse(raw)), { authenticated: true });
+  handle("pos:get-gateway-status", () => gateway.status(), { authenticated: true });
+  handle("pos:get-store-network", () => sync.storeNetwork(), { permission: "SETTINGS_MANAGE" });
+  handle("pos:provision-store-gateway", (raw) => {
+    const { storeId } = z.object({ storeId: z.string().uuid() }).parse(raw);
+    return sync.provisionGateway(storeId);
+  }, { permission: "SETTINGS_MANAGE", audit: true });
+  handle("pos:pair-gateway", (raw) => {
+    const input = z.object({
+      url: z.string().url(),
+      pairingCode: z.string().min(4).max(160),
+      name: z.string().trim().min(1).max(120),
+    }).parse(raw);
+    return gateway.pair(input);
+  }, { permission: "SETTINGS_MANAGE", audit: true });
+  handle("pos:disconnect-gateway", () => gateway.disconnect(), { permission: "SETTINGS_MANAGE", audit: true });
   handle("pos:update-status", () => updater.status());
   handle("pos:check-for-update", () => updater.check());
   handle("pos:download-update", () => updater.download());
@@ -312,11 +334,15 @@ export function registerIpc(
   handle("pos:sync", (raw) =>
     sync.sync(z.object({ forceRetry: z.boolean().optional() }).optional().parse(raw)?.forceRetry ?? false),
   { permission: "SYNC_MANAGE", audit: true });
-  handle("pos:list-products", (raw) =>
-    database.listProducts(listSchema.parse(raw)),
+  handle("pos:list-products", async (raw) => {
+    if (gateway.enabled()) await gateway.refreshProducts();
+    return database.listProducts(listSchema.parse(raw));
+  },
   { permission: ["POS_SELL", "INVENTORY_VIEW"] });
-  handle("pos:list-inventory", (raw) =>
-    database.listInventory(listSchema.parse(raw)),
+  handle("pos:list-inventory", async (raw) => {
+    if (gateway.enabled()) await gateway.refreshProducts();
+    return database.listInventory(listSchema.parse(raw));
+  },
   { permission: "INVENTORY_VIEW" });
   handle("pos:list-movements", (raw) =>
     database.listMovements(movementSchema.parse(raw)),
@@ -370,9 +396,28 @@ export function registerIpc(
   handle("pos:list-stock-entries", () => database.listStockEntries(), { permission: "STOCK_RECEIVE" });
   handle("pos:create-stock-entry", (raw) => {
     const user = access.require("STOCK_RECEIVE");
-    return database.createStockEntry({ ...stockEntrySchema.parse(raw), operatorId: user.id, operatorName: user.name });
+    const input = { ...stockEntrySchema.parse(raw), operatorId: user.id, operatorName: user.name };
+    if (!gateway.enabled()) return database.createStockEntry(input);
+    return gateway.applyStockBatch({
+      id: randomUUID(),
+      operation: "RECEIPT",
+      reference: input.supplierInvoice,
+      lines: database.gatewayStockEntryLines(input),
+    }).then(async () => {
+      const result = database.createStockEntry({ ...input, gatewayCommitted: true });
+      await gateway.refreshProducts();
+      return result;
+    });
   }, { permission: "STOCK_RECEIVE", audit: true });
-  handle("pos:cancel-stock-entry", (id) => database.cancelStockEntry(z.string().uuid().parse(id)), { permission: "STOCK_RECEIVE", audit: true });
+  handle("pos:cancel-stock-entry", async (rawId) => {
+    const id = z.string().uuid().parse(rawId);
+    if (!gateway.enabled()) return database.cancelStockEntry(id);
+    const cancellation = database.gatewayStockEntryCancellation(id);
+    await gateway.applyStockBatch({ id: randomUUID(), operation: "REVERSE", ...cancellation });
+    const result = database.cancelStockEntry(id, true);
+    await gateway.refreshProducts();
+    return result;
+  }, { permission: "STOCK_RECEIVE", audit: true });
   handle("pos:list-proposals", () => database.listProposals(), { permission: "CATALOG_REQUEST" });
   handle("pos:list-outbox", () => database.listOutbox(), { permission: "SYNC_MANAGE" });
   handle("pos:retry-outbox", (id) =>
@@ -381,10 +426,18 @@ export function registerIpc(
   handle("pos:create-proposal", (raw) =>
     database.createProposal(proposalSchema.parse(raw)),
   { permission: "CATALOG_REQUEST", audit: true });
-  handle("pos:checkout", (raw) => {
+  handle("pos:checkout", async (raw) => {
     sync.assertCanTransact();
     const user = access.require("POS_SELL");
-    return database.checkout({ ...checkoutSchema.parse(raw), operatorId: user.id, operatorName: user.name });
+    const input = { ...checkoutSchema.parse(raw), operatorId: user.id, operatorName: user.name };
+    if (!gateway.enabled()) return database.checkout(input);
+    const transactionId = randomUUID();
+    const device = JSON.parse(database.getSetting("device") ?? "{}") as { id?: string };
+    const saleNumber = `POS-${device.id?.slice(0, 6) ?? "LOCAL"}-${Date.now()}`;
+    await gateway.createSale(input, transactionId, saleNumber);
+    const sale = database.checkout({ ...input, transactionId, saleNumber, gatewayCommitted: true });
+    await gateway.refreshProducts();
+    return sale;
   }, { permission: "POS_SELL", audit: true });
   handle("pos:get-cash-session", () => database.getCashSession(), { permission: ["POS_SELL", "REGISTER_MANAGE"] });
   handle("pos:list-cash-sessions", () => database.listCashSessions(), { permission: "REGISTER_MANAGE" });
@@ -396,11 +449,21 @@ export function registerIpc(
     sync.assertCanTransact();
     return database.closeCashSession(cashCloseSchema.parse(raw));
   }, { permission: "REGISTER_MANAGE", audit: true });
-  handle("pos:adjust-stock", (raw) =>
-    database.adjustStock(stockSchema.parse(raw)),
+  handle("pos:adjust-stock", async (raw) => {
+    const input = stockSchema.parse(raw);
+    if (gateway.enabled()) await gateway.adjustStock(input);
+    const result = database.adjustStock({ ...input, gatewayCommitted: gateway.enabled() });
+    if (gateway.enabled()) await gateway.refreshProducts();
+    return result;
+  },
   { permission: "INVENTORY_MANAGE", audit: true });
-  handle("pos:update-product", (raw) =>
-    database.updateProduct(productUpdateSchema.parse(raw)),
+  handle("pos:update-product", async (raw) => {
+    const input = productUpdateSchema.parse(raw);
+    if (gateway.enabled()) await gateway.updateProduct(input);
+    const result = database.updateProduct({ ...input, gatewayCommitted: gateway.enabled() });
+    if (gateway.enabled()) await gateway.refreshProducts();
+    return result;
+  },
   { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:refresh-product-image", async (raw) => {
     const input = z.object({ productLocalId: z.string().min(1) }).parse(raw);
@@ -465,6 +528,19 @@ export function registerIpc(
     return Object.fromEntries(
       [...settingKeys, "endpoint"].map((key) => [key, values[key] ?? ""]),
     );
+  });
+  handle("pos:configure-deployment", (raw) => {
+    if (database.getSetting("deploymentConfigured") === "true")
+      throw new Error("DEPLOYMENT_ALREADY_CONFIGURED");
+    const input = z.object({
+      mode: z.enum(["solo", "multi"]),
+      gatewayUrl: z.string().url().optional(),
+    }).parse(raw);
+    if (input.mode === "multi" && !input.gatewayUrl) throw new Error("GATEWAY_URL_REQUIRED");
+    database.setSetting("deploymentMode", input.mode);
+    if (input.gatewayUrl) database.setSetting("gatewayUrl", input.gatewayUrl.replace(/\/$/, ""));
+    database.setSetting("deploymentConfigured", "true");
+    return database.getSettings();
   });
   handle("pos:update-settings", (raw) => {
     const values = z.record(z.string(), z.string().max(3_000_000)).parse(raw);

@@ -52,6 +52,43 @@ export class SyncService {
     return this.sync();
   }
 
+  async storeNetwork() {
+    const session = await this.activeSession();
+    const result = await graphqlRequest<{
+      myStores: Array<{
+        id: string;
+        code: string;
+        name: string;
+        timezone: string;
+        deploymentMode: "SOLO" | "MULTI_POS";
+        cloudSyncEnabled: boolean;
+        cloudGatewayUrl?: string;
+        localGatewayUrl?: string;
+        gatewayLastSeenAt?: string;
+        terminals: Array<{ id: string; name: string; status: string; lastSeenAt?: string }>;
+      }>;
+    }>(
+      session.endpoint,
+      `query PosStoreNetwork { myStores { id code name timezone deploymentMode cloudSyncEnabled cloudGatewayUrl localGatewayUrl gatewayLastSeenAt terminals { id name status lastSeenAt } } }`,
+      {},
+      session.accessToken,
+    );
+    return result.myStores;
+  }
+
+  async provisionGateway(storeId: string) {
+    const session = await this.activeSession();
+    const result = await graphqlRequest<{
+      provisionStoreGateway: { storeId: string; token: string; issuedAt: string; cloudGatewayUrl: string };
+    }>(
+      session.endpoint,
+      `mutation ProvisionPosStoreGateway($storeId: String!) { provisionStoreGateway(storeId: $storeId) { storeId token issuedAt cloudGatewayUrl } }`,
+      { storeId },
+      session.accessToken,
+    );
+    return result.provisionStoreGateway;
+  }
+
   async sync(forceRetry = false) {
     if (this.running) return this.state();
     this.running = true;

@@ -1,5 +1,5 @@
 import { autoUpdater } from "electron-updater";
-import type { BrowserWindow } from "electron";
+import { app, type BrowserWindow } from "electron";
 
 export type UpdateStatus = {
   status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
@@ -8,7 +8,7 @@ export type UpdateStatus = {
   error?: string;
 };
 
-const UPDATE_URL = process.env.POS_UPDATE_URL || "https://shea.openzey.com/downloads/pos";
+const UPDATE_URL = "https://shea.openzey.com/downloads/pos";
 
 export class PosUpdater {
   private current: UpdateStatus = { status: "idle" };
@@ -18,7 +18,7 @@ export class PosUpdater {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.allowPrerelease = false;
-    autoUpdater.setFeedURL({ provider: "generic", url: UPDATE_URL });
+    autoUpdater.setFeedURL({ provider: "generic", url: app.isPackaged ? UPDATE_URL : "http://127.0.0.1" });
     autoUpdater.on("checking-for-update", () => this.publish({ status: "checking" }));
     autoUpdater.on("update-available", (info) => this.publish({ status: "available", version: info.version }));
     autoUpdater.on("update-not-available", (info) => this.publish({ status: "not-available", version: info.version }));
