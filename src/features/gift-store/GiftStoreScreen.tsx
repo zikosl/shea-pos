@@ -22,14 +22,19 @@ const orderNicheId = (order: Order) => {
   try { return Number(JSON.parse(order.payload_json).nicheId) || undefined; } catch { return undefined; }
 };
 
-export function GiftStoreScreen({ capabilities, canManage }: { capabilities: CapabilityCode[]; canManage: boolean }) {
+export function GiftStoreScreen({ capabilities, canManage, syncVersion }: { capabilities: CapabilityCode[]; canManage: boolean; syncVersion?: string | null }) {
   const { t, language } = useI18n();
   const [rows, setRows] = useState<Order[]>([]), [query, setQuery] = useState(""), [loading, setLoading] = useState(true), [error, setError] = useState("");
   const [view, setView] = useState<ViewMode>("MONTH"), [cursor, setCursor] = useState(dayStart(new Date()));
   const [niches, setNiches] = useState<Niche[]>([]), [nicheFilter, setNicheFilter] = useState("");
   const [creating, setCreating] = useState(false), [selected, setSelected] = useState<Order | null>(null), [busy, setBusy] = useState(false);
   const load = async () => { setLoading(true); setError(""); try { setRows((await window.pos.listGiftOrders()) as Order[]); } catch (value) { setError(localizeError(language, value)); } finally { setLoading(false); } };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [syncVersion]);
+  useEffect(() => {
+    if (!selected) return;
+    const refreshed = rows.find((row) => row.id === selected.id);
+    if (refreshed) setSelected(refreshed);
+  }, [rows, selected?.id]);
   useEffect(() => {
     window.pos.listCatalog().then((value: any) => setNiches(value.niches ?? [])).catch(() => setNiches([]));
   }, []);

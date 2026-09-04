@@ -2,6 +2,15 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { PosApi } from "./contracts";
 
 const api: PosApi = {
+  updateStatus: () => ipcRenderer.invoke("pos:update-status"),
+  checkForUpdate: () => ipcRenderer.invoke("pos:check-for-update"),
+  downloadUpdate: () => ipcRenderer.invoke("pos:download-update"),
+  installUpdate: () => ipcRenderer.invoke("pos:install-update"),
+  onUpdateStatus: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: import("./updater").UpdateStatus) => listener(status);
+    ipcRenderer.on("pos:update-status", handler);
+    return () => ipcRenderer.removeListener("pos:update-status", handler);
+  },
   getState: () => ipcRenderer.invoke("pos:get-state"),
   signIn: (input) => ipcRenderer.invoke("pos:sign-in", input),
   signOut: () => ipcRenderer.invoke("pos:sign-out"),
@@ -15,7 +24,7 @@ const api: PosApi = {
   updateLocalUser: (input) => ipcRenderer.invoke("pos:update-local-user", input),
   resetLocalUserSecret: (input) => ipcRenderer.invoke("pos:reset-local-user-secret", input),
   listAuditLogs: () => ipcRenderer.invoke("pos:list-audit-logs"),
-  sync: () => ipcRenderer.invoke("pos:sync"),
+  sync: (options) => ipcRenderer.invoke("pos:sync", options),
   listProducts: (input) => ipcRenderer.invoke("pos:list-products", input),
   listInventory: (input) => ipcRenderer.invoke("pos:list-inventory", input),
   listMovements: (input) => ipcRenderer.invoke("pos:list-movements", input),

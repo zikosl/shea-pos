@@ -1,5 +1,6 @@
 export type PaymentMethod = "CASH" | "CARD" | "OTHER";
 export type LocalRole = "OWNER" | "MANAGER" | "CASHIER" | "STOCK_CLERK" | "CUSTOM";
+export type { UpdateStatus } from "./updater";
 export type Permission =
   | "POS_SELL" | "REGISTER_MANAGE" | "ORDERS_VIEW" | "INVOICES_VIEW"
   | "INVENTORY_VIEW" | "INVENTORY_MANAGE" | "STOCK_RECEIVE"
@@ -100,6 +101,11 @@ export type CreateCustomOrderInput = {
 };
 
 export type PosApi = {
+  updateStatus(): Promise<import("./updater").UpdateStatus>;
+  checkForUpdate(): Promise<import("./updater").UpdateStatus>;
+  downloadUpdate(): Promise<import("./updater").UpdateStatus>;
+  installUpdate(): Promise<void>;
+  onUpdateStatus(listener: (status: import("./updater").UpdateStatus) => void): () => void;
   getState(): Promise<unknown>;
   signIn(input: {
     endpoint: string;
@@ -118,7 +124,7 @@ export type PosApi = {
   updateLocalUser(input: { id: string; name: string; username: string; role: LocalRole; permissions?: Permission[]; active: boolean }): Promise<unknown>;
   resetLocalUserSecret(input: { id: string; secret: string }): Promise<void>;
   listAuditLogs(): Promise<unknown[]>;
-  sync(): Promise<unknown>;
+  sync(options?: { forceRetry?: boolean }): Promise<unknown>;
   listProducts(input?: {
     search?: string;
     categoryId?: number;

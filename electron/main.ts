@@ -6,10 +6,12 @@ import { registerIpc } from "./ipc";
 import { SyncService } from "./sync";
 import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
+import { PosUpdater } from "./updater";
 
 let mainWindow: BrowserWindow | null = null;
 let database: PosDatabase | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
+let updater: PosUpdater | null = null;
 
 function applicationIcon() {
   return app.isPackaged
@@ -83,7 +85,13 @@ else {
             : extension === ".gif"
               ? "image/gif"
               : "image/webp";
-        return new Response(bytes, { headers: { "content-type": contentType, "cache-control": "private, max-age=31536000, immutable" } });
+        return new Response(new Uint8Array(bytes), {
+          headers: {
+            "content-type": contentType,
+            "content-length": String(bytes.byteLength),
+            "cache-control": "private, max-age=31536000, immutable",
+          },
+        });
       } catch {
         return new Response("Not found", { status: 404 });
       }
@@ -99,7 +107,9 @@ else {
       database.setSetting("boundPartnerUserId", String(existingState.user.id));
     const access = new LocalAccessService(database);
     const window = createWindow();
-    registerIpc(database!, sync, access, assets, window);
+    updater = new PosUpdater(window);
+    registerIpc(database!, sync, access, assets, window, updater);
+    updater.start();
     syncTimer = setInterval(() => {
       if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     }, 60_000);
@@ -113,5 +123,6 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   if (syncTimer) clearInterval(syncTimer);
+  updater?.stop();
   database?.close();
 });

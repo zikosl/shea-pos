@@ -4,6 +4,7 @@ import {
   Boxes,
   Cloud,
   CloudOff,
+  Download as DownloadIcon,
   FileClock,
   Gift,
   Keyboard,
@@ -38,12 +39,13 @@ import {
   type Language,
 } from "./i18n";
 import type { AppState } from "./types";
-import type { Permission } from "../electron/contracts";
+import type { Permission, UpdateStatus } from "../electron/contracts";
 import { ErrorState } from "./components/AsyncState";
 import {
   KeyboardShortcuts,
   type KeyboardShortcut,
 } from "./components/KeyboardShortcuts";
+import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 
 type Page =
   "pos" | "stock" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
@@ -95,6 +97,8 @@ export default function App() {
   const [bootError, setBootError] = useState("");
   const [switchingOperator, setSwitchingOperator] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [update, setUpdate] = useState<UpdateStatus>({ status: "idle" });
   const language = (settings.language === "ar" ? "ar" : "en") as Language;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
 
@@ -119,6 +123,11 @@ export default function App() {
   };
   useEffect(() => {
     void initialize();
+  }, []);
+  useEffect(() => {
+    const unsubscribe = window.pos.onUpdateStatus(setUpdate);
+    void window.pos.updateStatus().then(setUpdate).catch(() => undefined);
+    return unsubscribe;
   }, []);
   useEffect(() => {
     if (!state.authenticated || !state.localAccess.authenticated) return;
@@ -176,7 +185,7 @@ export default function App() {
     setBusy(true);
     setNotice("");
     try {
-      const synced = (await window.pos.sync()) as Partial<AppState>;
+      const synced = (await window.pos.sync({ forceRetry: true })) as Partial<AppState>;
       // Sync refreshes server data; the local operator session stays active.
       setState((current) => ({ ...current, ...synced, localAccess: current.localAccess }));
       setNotice(t("everythingUpToDate"));
@@ -222,6 +231,16 @@ export default function App() {
       setNotice(localizeError(language, value));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function updateAction() {
+    try {
+      if (update.status === "available") setUpdate(await window.pos.downloadUpdate());
+      else if (update.status === "downloaded") await window.pos.installUpdate();
+      else setUpdate(await window.pos.checkForUpdate());
+    } catch (value) {
+      setNotice(localizeError(language, value));
     }
   }
 
@@ -333,7 +352,7 @@ export default function App() {
       key: "k",
       primary: true,
       allowInField: true,
-      run: focusPageSearch,
+      run: () => setCommandOpen(true),
     },
     {
       id: "search-f2",
@@ -380,15 +399,30 @@ export default function App() {
       run: () => setShortcutsOpen(true),
     },
   ];
+  const commandGroups = {
+    navigation: language === "ar" ? "التنقل" : "Navigation",
+    actions: language === "ar" ? "الإجراءات" : "Actions",
+    system: language === "ar" ? "النظام" : "System",
+  };
+  const commands: CommandItem[] = [
+    ...navigation.map((item) => ({ id: `command-${item.id}`, label: item.label, group: commandGroups.navigation, icon: item.icon, run: () => openPage(item.id) })),
+    { id: "command-sync", label: t("sync"), group: commandGroups.actions, icon: RefreshCw, shortcut: "Ctrl ⇧ S", run: () => void sync() },
+    { id: "command-search", label: t("focusSearch"), group: commandGroups.actions, icon: Keyboard, shortcut: "F2", run: focusPageSearch },
+    { id: "command-operator", label: t("switchOperator"), group: commandGroups.actions, icon: UserRoundCog, shortcut: "Ctrl ⇧ L", run: () => setSwitchingOperator(true) },
+    { id: "command-sidebar", label: sidebarCollapsed ? t("expandSidebar") : t("collapseSidebar"), group: commandGroups.system, icon: sidebarCollapsed ? PanelLeftOpen : PanelLeftClose, shortcut: "Ctrl B", run: () => void toggleSidebar() },
+    { id: "command-shortcuts", label: t("keyboardShortcuts"), group: commandGroups.system, icon: Keyboard, shortcut: "F1", run: () => setShortcutsOpen(true) },
+    { id: "command-logout", label: t("signOut"), group: commandGroups.system, icon: LogOut, run: () => void logout() },
+  ].filter((command) => command.id !== "command-sync" || can("SYNC_MANAGE"));
 
   return (
     <I18nProvider language={language}>
+      <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} commands={commands} placeholder={t("commandPalette")} emptyText={t("noMatchingCommands")} navigateText={t("navigate")} selectText={t("select")} />
       <div
         className={`shell ${page === "pos" ? "pos-mode" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
       >
         <KeyboardShortcuts
           shortcuts={shortcuts}
-          active={!switchingOperator && !shortcutsOpen}
+          active={!switchingOperator && !shortcutsOpen && !commandOpen}
         />
         <aside className="sidebar">
           <button
@@ -501,6 +535,21 @@ export default function App() {
               >
                 <RefreshCw className={busy ? "spin" : ""} /> {t("sync")}
               </button> : null}
+              {update.status !== "idle" && update.status !== "not-available" ? (
+                <button
+                  className={`button ${update.status === "error" ? "secondary" : "primary"}`}
+                  onClick={() => void updateAction()}
+                  disabled={update.status === "checking" || update.status === "downloading"}
+                  title={update.error || undefined}
+                >
+                  {update.status === "checking" ? <LoaderCircle className="spin" /> : <DownloadIcon />}
+                  {update.status === "available" ? `${t("updateAvailable")} ${update.version || ""}` : null}
+                  {update.status === "downloading" ? `${t("downloadingUpdate")} ${Math.round(update.percent || 0)}%` : null}
+                  {update.status === "downloaded" ? t("restartToUpdate") : null}
+                  {update.status === "checking" ? t("checkingForUpdates") : null}
+                  {update.status === "error" ? t("updateCheckFailed") : null}
+                </button>
+              ) : null}
             </div>
           </header>
           {notice && (
@@ -515,7 +564,7 @@ export default function App() {
             )}
             {page === "stock" && <InventoryScreen onNotice={setNotice} />}
             {page === "entries" && <StockEntriesScreen onNotice={setNotice} settings={settings} />}
-            {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} />}
+            {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen />}
             {page === "sales" && (
               <InvoicesScreen onNotice={setNotice} settings={settings} />

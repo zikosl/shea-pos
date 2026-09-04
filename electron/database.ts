@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type {
   ActivateProductInput,
@@ -32,9 +33,12 @@ type BootstrapPayload = {
 
 export class PosDatabase {
   readonly db: Database.Database;
+  private readonly assetRoot: string;
+  private readonly imageDataUrlCache = new Map<string, string>();
 
   constructor(userDataPath: string) {
     this.db = new Database(path.join(userDataPath, "shea-pos.sqlite"));
+    this.assetRoot = path.join(userDataPath, "assets");
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("busy_timeout = 5000");
@@ -295,9 +299,28 @@ export class PosDatabase {
   }
 
   private productImageUrl(row: any) {
-    return row.local_image_path
-      ? `shea-asset://local/${String(row.local_image_path).split("/").map(encodeURIComponent).join("/")}`
-      : null;
+    if (!row.local_image_path) return null;
+    const relativePath = String(row.local_image_path).replace(/\\/g, "/");
+    const cached = this.imageDataUrlCache.get(relativePath);
+    if (cached) return cached;
+    const target = path.resolve(this.assetRoot, relativePath);
+    const root = `${path.resolve(this.assetRoot)}${path.sep}`;
+    if (!target.startsWith(root)) return null;
+    try {
+      const extension = path.extname(target).toLowerCase();
+      const contentType = extension === ".png"
+        ? "image/png"
+        : extension === ".jpg" || extension === ".jpeg"
+          ? "image/jpeg"
+          : extension === ".gif"
+            ? "image/gif"
+            : "image/webp";
+      const dataUrl = `data:${contentType};base64,${readFileSync(target).toString("base64")}`;
+      this.imageDataUrlCache.set(relativePath, dataUrl);
+      return dataUrl;
+    } catch {
+      return null;
+    }
   }
 
   productImageCandidates() {
@@ -316,6 +339,7 @@ export class PosDatabase {
   }
 
   markProductImageReady(localId: string, relativePath: string, checksum?: string) {
+    this.imageDataUrlCache.delete(relativePath);
     this.db.prepare(
       "UPDATE products SET local_image_path=?,image_checksum=COALESCE(?,image_checksum),image_sync_state='READY',image_sync_error=NULL WHERE local_id=?",
     ).run(relativePath, checksum ?? null, localId);
@@ -1098,10 +1122,12 @@ export class PosDatabase {
       )
       .all();
   }
-  pendingOutbox() {
+  pendingOutbox(forceRetry = false) {
     return this.db
       .prepare(
-        "SELECT * FROM outbox WHERE state IN ('PENDING','ERROR') AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP) ORDER BY created_at LIMIT 50",
+        `SELECT * FROM outbox WHERE state IN ('PENDING','ERROR')
+         AND (${forceRetry ? "1=1" : "next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP"})
+         ORDER BY created_at LIMIT 50`,
       )
       .all() as any[];
   }

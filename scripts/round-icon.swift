@@ -15,7 +15,8 @@ let canvas = NSImage(size: size)
 canvas.lockFocus()
 NSColor.clear.setFill()
 NSRect(origin: .zero, size: size).fill()
-let radius = min(size.width, size.height) * 0.18
+// Match the platform-standard rounded-square silhouette used by desktop apps.
+let radius = min(size.width, size.height) * 0.22
 NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: radius, yRadius: radius).addClip()
 NSGraphicsContext.current?.imageInterpolation = .high
 image.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1)

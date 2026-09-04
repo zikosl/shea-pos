@@ -5,6 +5,7 @@ import { normalizeEndpoint, signIn } from "./graphql";
 import { clearSession } from "./session";
 import type { SyncService } from "./sync";
 import type { ProductAssetService } from "./assets";
+import type { PosUpdater } from "./updater";
 import {
   permissions,
   rolePermissions,
@@ -245,6 +246,7 @@ export function registerIpc(
   access: LocalAccessService,
   assets: ProductAssetService,
   mainWindow: BrowserWindow,
+  updater: PosUpdater,
 ) {
   const state = () => ({ ...sync.state(), localAccess: access.state() });
   const requireCapability = (capability: string) => {
@@ -263,6 +265,10 @@ export function registerIpc(
     return result;
   });
   handle("pos:get-state", state);
+  handle("pos:update-status", () => updater.status());
+  handle("pos:check-for-update", () => updater.check());
+  handle("pos:download-update", () => updater.download());
+  handle("pos:install-update", () => updater.install());
   handle("pos:sign-in", async (raw) => {
     const input = signInSchema.parse(raw);
     const endpoint = normalizeEndpoint(input.endpoint);
@@ -303,7 +309,9 @@ export function registerIpc(
     return access.resetSecret(input.id, input.secret);
   }, { permission: "USERS_MANAGE" });
   handle("pos:list-audit-logs", () => access.listAudit(), { permission: "USERS_MANAGE" });
-  handle("pos:sync", () => sync.sync(), { permission: "SYNC_MANAGE", audit: true });
+  handle("pos:sync", (raw) =>
+    sync.sync(z.object({ forceRetry: z.boolean().optional() }).optional().parse(raw)?.forceRetry ?? false),
+  { permission: "SYNC_MANAGE", audit: true });
   handle("pos:list-products", (raw) =>
     database.listProducts(listSchema.parse(raw)),
   { permission: ["POS_SELL", "INVENTORY_VIEW"] });

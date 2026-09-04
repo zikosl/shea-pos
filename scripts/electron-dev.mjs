@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { watch } from "node:fs";
+import { readFile as readFileAsync } from "node:fs/promises";
 import electronPath from "electron";
 import waitOn from "wait-on";
 
-await waitOn({
-  resources: ["tcp:127.0.0.1:5173", "file:dist-electron/main.js"],
-});
+await waitOn({ resources: ["file:.vite-dev-port", "file:dist-electron/main.js"] });
+const port = (await readFileAsync(".vite-dev-port", "utf8")).trim();
+await waitOn({ resources: [`tcp:127.0.0.1:${port}`] });
 
 let electronProcess;
 let restartTimer;
@@ -15,7 +16,7 @@ function startElectron() {
   electronProcess = spawn(electronPath, ["."], {
     env: {
       ...process.env,
-      VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
+      VITE_DEV_SERVER_URL: `http://127.0.0.1:${port}`,
     },
     stdio: "inherit",
   });

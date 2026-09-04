@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
@@ -261,9 +261,11 @@ app
         database.productImageCandidates().some((row) => row.local_id === "tracked"),
         true,
       );
+      mkdirSync(path.join(root, "assets", "products"), { recursive: true });
+      writeFileSync(path.join(root, "assets", "products", "serum.webp"), Buffer.from("RIFFtestWEBP"));
       database.markProductImageReady("tracked", "products/serum.webp", "checksum");
       const cachedProduct = database.listInventory({ search: "Tracked" }).find((row: any) => row.local_id === "tracked") as any;
-      assert.equal(cachedProduct.image, "shea-asset://local/products/serum.webp");
+      assert.match(cachedProduct.image, /^data:image\/webp;base64,/);
       assert.equal(cachedProduct.image_checksum, "checksum");
       database.setSetting("assetBase", "https://shea.example.com");
       database.db.prepare("UPDATE products SET remote_image_url='/api/uploads/products/serum.webp' WHERE local_id='tracked'").run();

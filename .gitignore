@@ -7,3 +7,4 @@ release/
 *.sqlite-wal
 .env
 .env.local
+.vite-dev-port

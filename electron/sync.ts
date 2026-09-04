@@ -52,18 +52,18 @@ export class SyncService {
     return this.sync();
   }
 
-  async sync() {
+  async sync(forceRetry = false) {
     if (this.running) return this.state();
     this.running = true;
     try {
       let session = await this.activeSession();
       try {
-        await this.push(session);
+        await this.push(session, forceRetry);
       } catch (error) {
         if (!String(error).toLowerCase().includes("token")) throw error;
         session = await refreshSession(session);
         writeSession(this.database, session);
-        await this.push(session);
+        await this.push(session, forceRetry);
       }
       const deviceKey = this.database.getSetting("deviceKey");
       if (!deviceKey) throw new Error("POS device is not activated");
@@ -102,11 +102,11 @@ export class SyncService {
     }
   }
 
-  private async push(session: Session) {
+  private async push(session: Session, forceRetry = false) {
     const device = JSON.parse(this.database.getSetting("device") ?? "{}") as {
       id?: string;
     };
-    for (const row of this.database.pendingOutbox()) {
+    for (const row of this.database.pendingOutbox(forceRetry)) {
       try {
         const payload = JSON.parse(row.payload_json);
         if (row.operation === "SUBMIT_CATALOG_PROPOSAL") {
@@ -260,12 +260,30 @@ export class SyncService {
         } else if (row.operation === "CREATE_CUSTOM_ORDER") {
           const { targetStatus, ...input } = payload;
           const selection = `id orderNumber nicheId customerName customerPhone status requiredAt fulfillmentMode deliveryAddress note subtotal discount total version createdAt updatedAt gift { occasion recipientName cardMessage style wrappingNote } lines { id productId name description quantity unitPrice unitCost total sortOrder } tasks { id title status dueAt sortOrder }`;
-          let data = await graphqlRequest<{ createGiftOrder: any }>(
-            session.endpoint,
-            `mutation CreateCustomOrder($input: CreateGiftOrderInput!) { createGiftOrder(input: $input) { ${selection} } }`,
-            { input },
-            session.accessToken,
-          );
+          let data: { createGiftOrder: any };
+          try {
+            data = await graphqlRequest<{ createGiftOrder: any }>(
+              session.endpoint,
+              `mutation CreateCustomOrder($input: CreateGiftOrderInput!) { createGiftOrder(input: $input) { ${selection} } }`,
+              { input },
+              session.accessToken,
+            );
+          } catch (error) {
+            // A stale catalog product must not block a custom order. Preserve
+            // the captured line details and let the server store it as custom.
+            if (!(error instanceof Error) || !error.message.includes("PRODUCT_NOT_FOUND")) throw error;
+            const customLines = input.lines.map(({ productId, ...line }: any) => line);
+            try {
+              data = await graphqlRequest<{ createGiftOrder: any }>(
+                session.endpoint,
+                `mutation CreateCustomOrderWithoutCatalogLink($input: CreateGiftOrderInput!) { createGiftOrder(input: $input) { ${selection} } }`,
+                { input: { ...input, lines: customLines } },
+                session.accessToken,
+              );
+            } catch (fallbackError) {
+              throw new Error(`PRODUCT_NOT_FOUND: ${fallbackError instanceof Error ? fallbackError.message : "custom item fallback failed"}`);
+            }
+          }
           let order = data.createGiftOrder;
           if (targetStatus && targetStatus !== "DRAFT") {
             const transitioned = await graphqlRequest<{ transitionGiftOrder: any }>(
