@@ -6,8 +6,8 @@ type ReceiptLanguage = "en" | "ar";
 type PrintSettings = Record<string, string>;
 
 const receiptText = {
-  en: { subtotal: "Subtotal", discount: "Discount", tax: "Tax", total: "Total", payment: "Payment", cash: "Cash", tendered: "Tendered", change: "Change", customer: "Customer", sku: "SKU", thankYou: "Thank you for your purchase" },
-  ar: { subtotal: "المجموع الفرعي", discount: "الخصم", tax: "الضريبة", total: "الإجمالي", payment: "الدفع", cash: "نقداً", tendered: "المبلغ المستلم", change: "الباقي", customer: "الزبون", sku: "الرمز", thankYou: "شكراً لتسوقكم معنا" },
+  en: { subtotal: "Subtotal", discount: "Discount", tax: "Tax", total: "Total", payment: "Payment", cash: "Cash", tendered: "Tendered", change: "Change", customer: "Customer", note: "Note", sku: "SKU", corrected: "Corrected invoice", scan: "Scan to find this invoice", thankYou: "Thank you for your purchase" },
+  ar: { subtotal: "المجموع الفرعي", discount: "الخصم", tax: "الضريبة", total: "الإجمالي", payment: "الدفع", cash: "نقداً", tendered: "المبلغ المستلم", change: "الباقي", customer: "الزبون", note: "ملاحظة", sku: "الرمز", corrected: "فاتورة مصححة", scan: "امسح للعثور على الفاتورة", thankYou: "شكراً لتسوقكم معنا" },
 };
 
 function escape(value: unknown) {
@@ -22,6 +22,11 @@ function enabled(settings: PrintSettings, key: string, fallback = true) {
 function numberSetting(settings: PrintSettings, key: string, fallback: number, min: number, max: number) {
   const value = Number(settings[key]);
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
+function choiceSetting(settings: PrintSettings, key: string, choices: string[], fallback: string) {
+  const value = settings[key];
+  return value && choices.includes(value) ? value : fallback;
 }
 
 function languageOf(settings: PrintSettings): ReceiptLanguage {
@@ -41,6 +46,20 @@ function barcodeSvg(value?: string | null) {
   }
 }
 
+function qrSvg(value?: string | null) {
+  if (!value) return "";
+  try {
+    return bwipjs.toSVG({ bcid: "qrcode", text: value, scale: 2, padding: 0, backgroundcolor: "FFFFFF" });
+  } catch {
+    return "";
+  }
+}
+
+function invoiceReference(saleNumber: string) {
+  const source = /^ORD-/i.test(saleNumber) ? "DELIVERY" : "POS";
+  return `shea:invoice:v1:${source}:${saleNumber}`;
+}
+
 function documentHtml(body: string, language: ReceiptLanguage, pageCss: string) {
   return `<!doctype html><html lang="${language}" dir="${language === "ar" ? "rtl" : "ltr"}"><head><meta charset="utf-8"><meta name="color-scheme" content="light"><style>*{box-sizing:border-box}html,body{margin:0;padding:0;background:#fff;color:#111}body{font-family:"Segoe UI",Tahoma,Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}${pageCss}</style></head><body>${body}</body></html>`;
 }
@@ -52,9 +71,36 @@ export function receiptHtml(sale: any, items: any[], settings: PrintSettings) {
   const footer = settings.receiptFooter || text.thankYou;
   const logo = settings.storeLogo;
   const payment = sale.payment_method === "CASH" ? text.cash : sale.payment_method;
+  const codeType = choiceSetting(settings, "receiptCodeType", ["none", "qr", "barcode", "both"], "qr");
+  const codePosition = choiceSetting(settings, "receiptCodePosition", ["header", "beforeTotals", "footer"], "footer");
+  const codeAlignment = choiceSetting(settings, "receiptCodeAlignment", ["start", "center", "end"], "center");
+  const density = choiceSetting(settings, "receiptDensity", ["compact", "standard", "comfortable"], "standard");
+  const textSize = choiceSetting(settings, "receiptTextSize", ["small", "standard", "large"], "standard");
+  const marginSize = choiceSetting(settings, "receiptMargin", ["small", "standard", "large"], "standard");
+  const logoSize = choiceSetting(settings, "receiptLogoSize", ["small", "medium", "large"], "medium");
+  const invoiceBarcode = codeType === "barcode" || codeType === "both" ? barcodeSvg(sale.sale_number) : "";
+  const invoiceQr = codeType === "qr" || codeType === "both" ? qrSvg(invoiceReference(String(sale.sale_number))) : "";
+  const revision = Number(sale.revision ?? 1);
+  const fontSize = textSize === "small" ? 9.5 : textSize === "large" ? 12.5 : 11;
+  const pageMargin = marginSize === "small" ? 2.5 : marginSize === "large" ? 6 : 4;
+  const itemGap = density === "compact" ? 1.3 : density === "comfortable" ? 3.4 : 2.4;
+  const ruleGap = density === "compact" ? 2 : density === "comfortable" ? 4 : 3;
+  const logoWidth = logoSize === "small" ? 14 : logoSize === "large" ? 30 : 22;
+  const logoHeight = logoSize === "small" ? 10 : logoSize === "large" ? 22 : 16;
+  const codeJustify = codeAlignment === "center"
+    ? "center"
+    : codeAlignment === "start"
+      ? (language === "ar" ? "flex-end" : "flex-start")
+      : (language === "ar" ? "flex-start" : "flex-end");
+  const codeTextAlign = codeJustify === "center" ? "center" : codeJustify === "flex-end" ? "right" : "left";
+  const stackCodes = width < 70 || codeType !== "both";
+  const codeBlock = codeType === "none" || (!invoiceQr && !invoiceBarcode) ? "" : `<section class="invoice-codes"><div class="code-assets">${invoiceQr ? `<div class="qr">${invoiceQr}</div>` : ""}${invoiceBarcode ? `<div class="barcode">${invoiceBarcode}</div>` : ""}</div><small>${text.scan}</small></section>`;
   const lines = items.map((item) => `<div class="item"><div class="item-name"><strong>${escape(item.product_name)}</strong>${item.variant_name ? `<small>${escape(item.variant_name)}</small>` : ""}${enabled(settings, "receiptShowSku", true) && item.sku ? `<small>${text.sku}: ${escape(item.sku)}</small>` : ""}</div><div class="row"><span>${item.quantity} × ${money(item.unit_price)}</span><strong>${money(item.total)}</strong></div></div>`).join("");
-  const body = `<main class="receipt"><header>${enabled(settings, "receiptShowLogo", true) && logo ? `<img src="${escape(logo)}" alt="">` : ""}<h1>${escape(settings.storeName || "Shea POS")}</h1>${settings.receiptHeader ? `<p>${escape(settings.receiptHeader)}</p>` : ""}</header><div class="meta"><strong>${escape(sale.sale_number)}</strong><span>${escape(new Date(sale.created_at).toLocaleString(language === "ar" ? "ar-DZ" : "en-DZ"))}</span></div>${enabled(settings, "receiptShowCustomer", true) && sale.customer_name ? `<div class="customer">${text.customer}: ${escape(sale.customer_name)}</div>` : ""}<div class="rule"></div>${lines}<div class="rule"></div><div class="totals"><div class="row"><span>${text.subtotal}</span><span>${money(sale.subtotal)}</span></div>${Number(sale.discount_total) ? `<div class="row"><span>${text.discount}</span><span>-${money(sale.discount_total)}</span></div>` : ""}${Number(sale.tax_total) ? `<div class="row"><span>${text.tax}</span><span>${money(sale.tax_total)}</span></div>` : ""}<div class="row grand"><strong>${text.total}</strong><strong>${money(sale.total)}</strong></div><div class="row"><span>${text.payment}</span><span>${escape(payment)}</span></div>${enabled(settings, "receiptShowTendered", true) ? `<div class="row"><span>${text.tendered}</span><span>${money(sale.amount_tendered)}</span></div><div class="row"><span>${text.change}</span><span>${money(sale.change_due)}</span></div>` : ""}</div><footer>${escape(footer)}</footer></main>`;
-  return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;min-height:90mm;padding:4mm;font-size:11px}.receipt header{text-align:center;margin-bottom:3mm}.receipt header img{display:block;max-width:22mm;max-height:16mm;object-fit:contain;margin:0 auto 2mm}.receipt h1{font-size:18px;margin:0}.receipt header p,.meta span{margin:1mm 0;color:#444;font-size:9px;white-space:pre-line}.meta{display:flex;justify-content:space-between;gap:3mm;font-size:9px}.customer{margin-top:2mm}.rule{border-top:1px dashed #111;margin:3mm 0}.item{margin:2.4mm 0}.item-name{display:flex;flex-direction:column}.item small{font-size:8px;color:#444}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:3mm}.totals .row{margin:1.2mm 0}.grand{padding-top:2mm;margin-top:2mm!important;border-top:1px solid #111;font-size:15px}.receipt footer{text-align:center;white-space:pre-line;margin-top:5mm;font-size:9px}`);
+  const meta = `<div class="meta"><strong>${escape(sale.sale_number)}</strong><span>${escape(new Date(sale.created_at).toLocaleString(language === "ar" ? "ar-DZ" : "en-DZ"))}</span></div>`;
+  const details = `${revision > 1 ? `<div class="corrected">${text.corrected} · ${revision}</div>` : ""}${enabled(settings, "receiptShowCustomer", true) && sale.customer_name ? `<div class="customer">${text.customer}: ${escape(sale.customer_name)}</div>` : ""}${enabled(settings, "receiptShowNote", true) && sale.note ? `<div class="customer">${text.note}: ${escape(sale.note)}</div>` : ""}`;
+  const totals = `<div class="totals"><div class="row"><span>${text.subtotal}</span><span>${money(sale.subtotal)}</span></div>${Number(sale.discount_total) ? `<div class="row"><span>${text.discount}</span><span>-${money(sale.discount_total)}</span></div>` : ""}${Number(sale.tax_total) ? `<div class="row"><span>${text.tax}</span><span>${money(sale.tax_total)}</span></div>` : ""}<div class="row grand"><strong>${text.total}</strong><strong>${money(sale.total)}</strong></div><div class="row"><span>${text.payment}</span><span>${escape(payment)}</span></div>${enabled(settings, "receiptShowTendered", true) ? `<div class="row"><span>${text.tendered}</span><span>${money(sale.amount_tendered)}</span></div><div class="row"><span>${text.change}</span><span>${money(sale.change_due)}</span></div>` : ""}</div>`;
+  const body = `<main class="receipt"><header>${enabled(settings, "receiptShowLogo", true) && logo ? `<img src="${escape(logo)}" alt="">` : ""}<h1>${escape(settings.storeName || "Shea POS")}</h1>${settings.receiptHeader ? `<p>${escape(settings.receiptHeader)}</p>` : ""}</header>${meta}${codePosition === "header" ? codeBlock : ""}${details}<div class="rule"></div>${lines}<div class="rule"></div>${codePosition === "beforeTotals" ? codeBlock : ""}${totals}${codePosition === "footer" ? codeBlock : ""}<footer>${escape(footer)}</footer></main>`;
+  return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;min-height:90mm;padding:${pageMargin}mm;font-size:${fontSize}px}.receipt header{text-align:center;margin-bottom:${ruleGap}mm}.receipt header img{display:block;max-width:${logoWidth}mm;max-height:${logoHeight}mm;object-fit:contain;margin:0 auto 2mm}.receipt h1{font-size:${fontSize + 7}px;margin:0}.receipt header p,.meta span{margin:1mm 0;color:#444;font-size:${Math.max(8, fontSize - 2)}px;white-space:pre-line}.meta{display:flex;justify-content:space-between;gap:3mm;font-size:${Math.max(8, fontSize - 2)}px;direction:${language === "ar" ? "rtl" : "ltr"}}.customer{margin-top:2mm}.corrected{margin:2mm 0;padding:1.5mm;border:1px solid #111;text-align:center;font-size:${Math.max(8, fontSize - 2)}px;font-weight:700}.rule{border-top:1px dashed #111;margin:${ruleGap}mm 0}.item{margin:${itemGap}mm 0}.item-name{display:flex;flex-direction:column}.item small{font-size:${Math.max(7, fontSize - 3)}px;color:#444}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:3mm}.totals .row{margin:${density === "compact" ? 0.8 : density === "comfortable" ? 1.6 : 1.2}mm 0}.grand{padding-top:2mm;margin-top:2mm!important;border-top:1px solid #111;font-size:${fontSize + 4}px}.invoice-codes{margin-top:${ruleGap}mm;padding-top:${Math.max(1.5, ruleGap - 0.5)}mm;border-top:1px dashed #111;text-align:${codeTextAlign};direction:ltr}.code-assets{display:flex;flex-direction:${stackCodes ? "column" : "row"};align-items:${codeJustify};justify-content:${codeJustify};gap:2mm}.invoice-codes .qr svg{display:block;width:18mm;height:18mm}.invoice-codes .barcode{width:${Math.max(28, width - (pageMargin * 2) - 5)}mm;max-width:100%}.invoice-codes .barcode svg{display:block;width:100%;max-height:17mm}.invoice-codes small{display:block;margin-top:1.5mm;color:#444;font-size:${Math.max(7, fontSize - 3)}px}.receipt footer{text-align:center;white-space:pre-line;margin-top:${ruleGap + 1}mm;font-size:${Math.max(8, fontSize - 2)}px}`);
 }
 
 function deliveryReceipt(database: PosDatabase, id: string) {
@@ -93,10 +139,10 @@ function deliveryReceipt(database: PosDatabase, id: string) {
   };
 }
 
-export function previewInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string) {
-  if (source === "POS") return previewReceipt(database, id);
+export function previewInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string, draft: PrintSettings = {}) {
+  if (source === "POS") return previewReceipt(database, id, draft);
   const { sale, items } = deliveryReceipt(database, id);
-  return receiptHtml(sale, items, database.getSettings());
+  return receiptHtml(sale, items, { ...database.getSettings(), ...draft });
 }
 
 export async function printInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string, printerName?: string) {

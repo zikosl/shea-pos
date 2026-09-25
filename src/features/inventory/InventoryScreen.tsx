@@ -252,6 +252,7 @@ export function InventoryScreen({
         stock: Number(data.get("stock")),
         reorderThreshold: Number(data.get("threshold")),
         trackInventory: data.get("tracked") === "on",
+        priceOnRequest: data.get("priceOnRequest") === "on",
       });
       onNotice(`${localized(row)}: ${t("productActivated")}`);
       await load();
@@ -282,6 +283,7 @@ export function InventoryScreen({
         stock: Number(data.get("stock") || 0),
         reorderThreshold: Number(data.get("threshold") || 0),
         trackInventory: data.get("tracked") === "on",
+        priceOnRequest: data.get("priceOnRequest") === "on",
       });
       setShowCreate(false);
       setTab("products");
@@ -600,12 +602,22 @@ export function InventoryScreen({
                         ) : null}
                       </span>
                     </span>
-                    <InlineNumber
-                      value={product.price}
-                      onSave={(price) =>
-                        update(product.local_id, { price }, t("priceSaved"))
-                      }
-                    />
+                    <span className="stock-cell">
+                      <InlineNumber
+                        value={product.price}
+                        onSave={(price) =>
+                          update(product.local_id, { price }, t("priceSaved"))
+                        }
+                      />
+                      <label className="tiny-check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(product.price_on_request)}
+                          onChange={(event) => void update(product.local_id, { priceOnRequest: event.target.checked }, t("priceModeSaved"))}
+                        />
+                        {t("priceOnRequest")}
+                      </label>
+                    </span>
                     <InlineNumber
                       value={product.cost_price}
                       onSave={(costPrice) =>
@@ -777,6 +789,10 @@ export function InventoryScreen({
                   <label className="switch-label">
                     <input name="tracked" type="checkbox" defaultChecked />
                     {t("trackStock")}
+                  </label>
+                  <label className="switch-label">
+                    <input name="priceOnRequest" type="checkbox" />
+                    {t("priceOnRequest")}
                   </label>
                   <button
                     className="button primary full"
@@ -965,6 +981,10 @@ export function InventoryScreen({
             <label className="switch-label">
               <input name="tracked" type="checkbox" defaultChecked />
               {t("trackStock")}
+            </label>
+            <label className="switch-label">
+              <input name="priceOnRequest" type="checkbox" />
+              {t("priceOnRequest")}
             </label>
             <div className="dialog-actions">
               <button

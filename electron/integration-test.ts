@@ -35,6 +35,11 @@ app
       assert.throws(() => access.require("USERS_MANAGE"), /PERMISSION_DENIED/);
       access.logout();
       access.login("owner", "2468");
+      access.logout();
+      assert.throws(() => access.recoverOwnerSecret("cashier", "9999"), /Active local owner not found/);
+      access.recoverOwnerSecret("owner", "8642");
+      assert.throws(() => access.login("owner", "2468"), /Invalid local credentials/);
+      access.login("owner", "8642");
       assert.equal(access.listAudit().length > 0, true);
       database.setSetting("device", JSON.stringify({ id: "test-device" }));
       database.setSetting(
@@ -73,6 +78,23 @@ app
           { productLocalId: "unlimited", quantity: 3 },
         ],
       }) as any;
+      assert.equal((database.lookupInvoice(sale.sale_number) as any).id, sale.id);
+      assert.equal((database.lookupInvoice(`shea:invoice:v1:POS:${sale.sale_number}`) as any).id, sale.id);
+      const correctedSale = database.correctInvoiceDetails({
+        id: sale.id,
+        customerName: "Corrected customer",
+        note: "Updated contact note",
+        reason: "Customer requested a name correction",
+        operatorId: "test-manager",
+        operatorName: "Test manager",
+      }) as any;
+      assert.equal(correctedSale.revision, 2);
+      assert.equal(correctedSale.customer_name, "Corrected customer");
+      assert.equal(correctedSale.revisions.length, 1);
+      assert.equal(correctedSale.total, sale.total);
+      assert.equal((database.getProductByLocalId("tracked") as any).stock, 3);
+      const queuedSale = database.db.prepare("SELECT payload_json FROM outbox WHERE aggregate_type='Sale' AND aggregate_id=?").get(sale.id) as any;
+      assert.equal(JSON.parse(queuedSale.payload_json).customerName, "Corrected customer");
       assert.equal(sale.total, 350);
       assert.equal(sale.cost_total, 150);
       assert.equal(sale.gross_profit, 200);
@@ -156,6 +178,24 @@ app
       assert.equal(database.listMovements({}).length, 1);
       assert.equal((database.getCashSession() as any).expected_cash, 1_350);
       assert.equal(database.countPendingOutbox(), 4);
+      mkdirSync(path.join(root, "assets", "catalog-drafts"), { recursive: true });
+      writeFileSync(path.join(root, "assets", "catalog-drafts", "perfume.jpg"), Buffer.from("offline-image"));
+      const productBundle = database.createLocalProductBundle({
+        name: "Offline perfume",
+        categoryId: 1,
+        trackInventory: true,
+        images: ["draft:catalog-drafts/perfume.jpg"],
+        variants: [
+          { name: "30 ml", tags: ["30 ml"], sku: "PERF-30", price: 1200, stock: 4 },
+          { name: "50 ml", tags: ["50 ml"], sku: "PERF-50", price: 1800, stock: 2 },
+        ],
+      }) as any[];
+      assert.equal(productBundle.length, 2);
+      assert.equal(productBundle.every((row) => row.provisional === 1), true);
+      assert.equal(database.listProducts({ search: "Offline perfume" }).every((row: any) => row.image?.startsWith("data:image/jpeg;base64,")), true);
+      const bundleOutbox = database.pendingOutbox().find((row: any) => row.aggregate_type === "ProductBundle") as any;
+      assert.ok(bundleOutbox);
+      assert.equal(JSON.parse(bundleOutbox.payload_json).variants.length, 2);
       database.adjustStock({
         productLocalId: "tracked",
         mode: "RECEIVE",
@@ -211,7 +251,28 @@ app
       assert.equal(unitPricedEntry.entry.total_cost, 150);
       assert.equal((database.getProductByLocalId("tracked") as any).cost_price, 54);
       database.cancelStockEntry(unitPricedEntry.entry.id);
-      assert.match(previewReceipt(database, sale.id), /POS-/);
+      const correctedReceipt = previewReceipt(database, sale.id);
+      assert.match(correctedReceipt, /POS-/);
+      assert.match(correctedReceipt, /<section class="invoice-codes">/);
+      assert.match(correctedReceipt, /Corrected invoice|فاتورة مصححة/);
+      const qrReceipt = previewReceipt(database, sale.id, {
+        receiptCodeType: "qr",
+        receiptCodePosition: "header",
+        receiptCodeAlignment: "end",
+        receiptShowNote: "false",
+      });
+      assert.match(qrReceipt, /class="qr"/);
+      assert.doesNotMatch(qrReceipt, /class="barcode"/);
+      assert.equal(qrReceipt.indexOf("<section class=\"invoice-codes\">") < qrReceipt.indexOf("class=\"customer\""), true);
+      assert.doesNotMatch(qrReceipt, /Updated contact note/);
+      const narrowDualCodeReceipt = previewReceipt(database, sale.id, {
+        receiptPaperWidth: "58",
+        receiptCodeType: "both",
+      });
+      assert.match(narrowDualCodeReceipt, /flex-direction:column/);
+      assert.match(narrowDualCodeReceipt, /class="qr"/);
+      assert.match(narrowDualCodeReceipt, /class="barcode"/);
+      assert.doesNotMatch(previewReceipt(database, sale.id, { receiptCodeType: "none" }), /<section class="invoice-codes">/);
       assert.match(
         previewPriceLabel(database, provisional.local_id),
         /Offline serum/,
@@ -226,6 +287,7 @@ app
         items: [{ quantity: 1, price: 700, product: { customName: "Delivered serum" } }],
       }));
       assert.match(previewInvoice(database, "DELIVERY", "42"), /Delivered serum/);
+      assert.equal((database.lookupInvoice("shea:invoice:v1:DELIVERY:ORD-42") as any).id, "42");
       assert.equal(database.listInvoices().some((row: any) => row.source === "DELIVERY"), true);
       database.db
         .prepare(

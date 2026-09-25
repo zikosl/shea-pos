@@ -1,9 +1,9 @@
-import { BrowserWindow, clipboard, ipcMain } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { PosDatabase } from "./database";
-import { normalizeEndpoint, signIn } from "./graphql";
-import { clearSession } from "./session";
+import { listAccountSessions, logoutAccountSession, normalizeEndpoint, refreshSession, revokeAccountSession, revokeOtherAccountSessions, signIn } from "./graphql";
+import { clearSession, readSession, writeSession } from "./session";
 import type { SyncService } from "./sync";
 import type { ProductAssetService } from "./assets";
 import type { PosUpdater } from "./updater";
@@ -34,6 +34,11 @@ const signInSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
   deviceName: z.string().trim().min(1).max(80),
+});
+const recoverLocalOwnerSchema = z.object({
+  username: z.string().trim().min(1).max(80),
+  partnerPassword: z.string().min(1).max(500),
+  secret: z.string().min(4).max(128),
 });
 const listSchema = z
   .object({
@@ -95,6 +100,7 @@ const documentSchema = z.object({
   source: z.enum(["POS", "DELIVERY"]),
   id: z.string().min(1),
   printerName: z.string().optional(),
+  settings: z.record(z.string(), z.string().max(3_000_000)).optional(),
 });
 const stockEntryDocumentSchema = z.object({ id: z.string().uuid(), printerName: z.string().optional() });
 const productUpdateSchema = z.object({
@@ -107,6 +113,7 @@ const productUpdateSchema = z.object({
   trackInventory: z.boolean().optional(),
   available: z.boolean().optional(),
   visibleInPos: z.boolean().optional(),
+  priceOnRequest: z.boolean().optional(),
   active: z.boolean().optional(),
 });
 const activateSchema = z.object({
@@ -117,6 +124,7 @@ const activateSchema = z.object({
   trackInventory: z.boolean(),
   reorderThreshold: z.number().int().min(0).optional(),
   visibleInPos: z.boolean().optional(),
+  priceOnRequest: z.boolean().optional(),
 });
 const localProductSchema = z.object({
   name: z.string().trim().min(2).max(160),
@@ -133,7 +141,24 @@ const localProductSchema = z.object({
   stock: z.number().int().min(0),
   trackInventory: z.boolean(),
   reorderThreshold: z.number().int().min(0).optional(),
+  priceOnRequest: z.boolean().optional(),
 });
+const localProductBundleSchema = localProductSchema
+  .omit({ variantName: true, sku: true, image: true, price: true, costPrice: true, stock: true, reorderThreshold: true, priceOnRequest: true })
+  .extend({
+    images: z.array(z.string().startsWith("draft:catalog-drafts/").max(1000)).min(1).max(12),
+    variants: z.array(z.object({
+      name: z.string().trim().min(1).max(120),
+      tags: z.array(z.string().trim().min(1).max(80)).min(1).max(20),
+      sku: z.string().trim().min(1).max(120),
+      image: z.string().startsWith("draft:catalog-drafts/").max(1000).optional(),
+      price: z.number().min(0),
+      costPrice: z.number().min(0).optional(),
+      stock: z.number().int().min(0),
+      reorderThreshold: z.number().int().min(0).optional(),
+      priceOnRequest: z.boolean().optional(),
+    })).min(1).max(100),
+  });
 const movementSchema = z
   .object({
     search: z.string().max(120).optional(),
@@ -160,6 +185,13 @@ const cashCloseSchema = z.object({
 const printSchema = z.object({
   saleId: z.string().min(1),
   printerName: z.string().optional(),
+});
+const invoiceLookupSchema = z.object({ reference: z.string().trim().min(1).max(300) });
+const invoiceCorrectionSchema = z.object({
+  id: z.string().uuid(),
+  customerName: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(1000).optional(),
+  reason: z.string().trim().min(3).max(500),
 });
 const printPreviewSchema = z
   .object({
@@ -215,7 +247,33 @@ const customOrderSchema = z.object({
   lines: z.array(z.object({ productLocalId: z.string().optional(), name: z.string().trim().min(1).max(160), description: z.string().trim().max(500).optional(), quantity: z.number().positive(), unitPrice: z.number().min(0), unitCost: z.number().min(0).optional() })).min(1),
   tasks: z.array(z.string().trim().min(1).max(160)).max(30).optional(),
 }).refine((value) => value.fulfillmentMode !== "DELIVERY" || Boolean(value.deliveryAddress), { message: "Delivery address is required", path: ["deliveryAddress"] });
-const customOrderTransitionSchema = z.object({ id: z.string().min(1), status: z.enum(["REQUESTED", "QUOTED", "AWAITING_CUSTOMER_APPROVAL", "CONFIRMED", "MATERIALS_RESERVED", "IN_PREPARATION", "READY", "FULFILLED", "CANCELLED"]) });
+const customOrderTransitionSchema = z.object({ id: z.string().min(1), status: z.enum(["REQUESTED", "QUOTED", "AWAITING_CUSTOMER_APPROVAL", "CONFIRMED", "SCHEDULED", "PREPARATION_DUE", "MATERIALS_RESERVED", "IN_PREPARATION", "READY", "FULFILLED", "CANCELLED"]) });
+const customOrderQuotationSchema = z.object({
+  id: z.string().min(1),
+  proposedFor: z.string().datetime().optional(),
+  validUntil: z.string().datetime().optional(),
+  preparationStartsAt: z.string().datetime().optional(),
+  discount: z.number().finite().min(0).optional(),
+  note: z.string().trim().max(1000).optional(),
+  lines: z.array(z.object({
+    productId: z.number().int().positive().optional(),
+    name: z.string().trim().min(1).max(240),
+    description: z.string().trim().max(1000).optional(),
+    quantity: z.number().finite().positive(),
+    unitPrice: z.number().finite().min(0),
+  })).min(1).max(100),
+});
+const onlineOrderTransitionSchema = z.object({
+  id: z.number().int().positive(),
+  status: z.enum(["PARTNER_ACCEPTED", "PREPARING", "READY"]),
+  expectedVersion: z.number().int().positive(),
+});
+const onlineOrderQuotationSchema = z.object({
+  id: z.number().int().positive(),
+  expectedVersion: z.number().int().positive(),
+  note: z.string().trim().max(1000).optional(),
+  lines: z.array(z.object({ orderItemId: z.number().int().positive(), unitPrice: z.number().finite().min(0) })).min(1).max(100),
+});
 
 const settingKeys = [
   "theme",
@@ -229,6 +287,15 @@ const settingKeys = [
   "receiptShowCustomer",
   "receiptShowSku",
   "receiptShowTendered",
+  "receiptShowNote",
+  "receiptPreset",
+  "receiptDensity",
+  "receiptTextSize",
+  "receiptMargin",
+  "receiptLogoSize",
+  "receiptCodeType",
+  "receiptCodePosition",
+  "receiptCodeAlignment",
   "labelWidth",
   "labelHeight",
   "labelShowLogo",
@@ -294,7 +361,17 @@ export function registerIpc(
   handle("pos:sign-in", async (raw) => {
     const input = signInSchema.parse(raw);
     const endpoint = normalizeEndpoint(input.endpoint);
-    const result = await signIn(endpoint, input.email, input.password);
+    let deviceKey = database.getSetting("deviceKey");
+    if (!deviceKey) {
+      deviceKey = randomUUID();
+      database.setSetting("deviceKey", deviceKey);
+    }
+    const result = await signIn(endpoint, input.email, input.password, {
+      deviceKey,
+      deviceName: input.deviceName,
+      platform: `desktop-${process.platform}`,
+      appVersion: app.getVersion(),
+    });
     const boundPartnerUserId = database.getSetting("boundPartnerUserId");
     if (boundPartnerUserId && boundPartnerUserId !== String(result.signIn.user.id))
       throw new Error("This POS installation belongs to another partner account");
@@ -303,12 +380,44 @@ export function registerIpc(
       database.setSetting("boundPartnerUserId", String(result.signIn.user.id));
     return state();
   });
-  handle("pos:sign-out", () => {
+  handle("pos:sign-out", async () => {
     access.audit("PARTNER_SIGN_OUT");
+    let session = readSession(database);
+    if (session && !session.tokenId) {
+      const existingSession = session;
+      session = await refreshSession(existingSession).catch(() => existingSession);
+      if (session.tokenId) writeSession(database, session);
+    }
+    if (session?.tokenId) await logoutAccountSession(session).catch(() => undefined);
     access.logout();
     clearSession(database);
     return undefined;
   }, { authenticated: true });
+  handle("pos:list-account-sessions", async () => {
+    let session = readSession(database);
+    if (!session) throw new Error("Sign in is required");
+    if (!session.tokenId) {
+      session = await refreshSession(session);
+      writeSession(database, session);
+    }
+    const result = await listAccountSessions(session);
+    return { sessions: result.mySessions, currentTokenId: session.tokenId || "" };
+  }, { permission: "SETTINGS_MANAGE" });
+  handle("pos:revoke-account-session", async (raw) => {
+    const { tokenId } = z.object({ tokenId: z.string().uuid() }).parse(raw);
+    const session = readSession(database);
+    if (!session) throw new Error("Sign in is required");
+    await revokeAccountSession(session, tokenId);
+    if (tokenId === session.tokenId) {
+      access.logout();
+      clearSession(database);
+    }
+  }, { permission: "SETTINGS_MANAGE", audit: true });
+  handle("pos:revoke-other-account-sessions", async () => {
+    const session = readSession(database);
+    if (!session) throw new Error("Sign in is required");
+    await revokeOtherAccountSessions(session);
+  }, { permission: "SETTINGS_MANAGE", audit: true });
   handle("pos:setup-local-owner", (raw) => {
     if (!sync.state().authenticated) throw new Error("Online partner sign-in is required");
     const input = localUserBaseSchema.pick({ name: true, username: true, secret: true }).parse(raw);
@@ -317,6 +426,23 @@ export function registerIpc(
   });
   handle("pos:local-login", (raw) => {
     const input = localLoginSchema.parse(raw);
+    access.login(input.username, input.secret);
+    return state();
+  });
+  handle("pos:recover-local-owner", async (raw) => {
+    const input = recoverLocalOwnerSchema.parse(raw);
+    const session = readSession(database);
+    if (!session?.user.email) throw new Error("Online partner verification is unavailable");
+    const result = await signIn(session.endpoint, session.user.email, input.partnerPassword, {
+      deviceKey: `${database.getSetting("deviceKey") || randomUUID()}-recovery`,
+      deviceName: "Shea POS recovery verification",
+      platform: `desktop-${process.platform}`,
+      appVersion: app.getVersion(),
+    });
+    await logoutAccountSession({ endpoint: session.endpoint, ...result.signIn }).catch(() => undefined);
+    if (String(result.signIn.user.id) !== String(session.user.id))
+      throw new Error("Partner account does not match this POS installation");
+    access.recoverOwnerSecret(input.username, input.secret);
     access.login(input.username, input.secret);
     return state();
   });
@@ -363,11 +489,35 @@ export function registerIpc(
     return product;
   },
   { permission: "CATALOG_REQUEST", audit: true });
+  handle("pos:create-local-product-bundle", async (raw) => {
+    const products = database.createLocalProductBundle(localProductBundleSchema.parse(raw)) as Array<{ local_id: string }>;
+    await Promise.all(products.map((product) => assets.localizeProduct(product.local_id)));
+    return products;
+  }, { permission: "CATALOG_REQUEST", audit: true });
+  handle("pos:select-catalog-image", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "Choose product image",
+      properties: ["openFile"],
+      filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp"] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    return assets.importCatalogDraft(result.filePaths[0]);
+  }, { permission: "CATALOG_REQUEST" });
   handle("pos:get-overview", (raw) =>
     database.overview(reportSchema.parse(raw)),
   { permission: "REPORTS_VIEW" });
   handle("pos:list-sales", () => database.listSales(), { permission: "INVOICES_VIEW" });
   handle("pos:list-orders", () => database.listOrders(), { permission: "ORDERS_VIEW" });
+  handle("pos:transition-online-order", (raw) => {
+    sync.assertCanTransact();
+    const input = onlineOrderTransitionSchema.parse(raw);
+    return database.queueOnlineOrderCommand(input.id, "TRANSITION_ONLINE_ORDER", input.status, input);
+  }, { permission: "ORDERS_VIEW", audit: true });
+  handle("pos:create-online-order-quotation", (raw) => {
+    sync.assertCanTransact();
+    const input = onlineOrderQuotationSchema.parse(raw);
+    return database.queueOnlineOrderCommand(input.id, "CREATE_ONLINE_ORDER_QUOTATION", "AWAITING_CLIENT_APPROVAL", input);
+  }, { permission: "ORDERS_VIEW", audit: true });
   handle("pos:list-gift-orders", () => { requireCapability("CUSTOM_ORDERS"); return database.listGiftOrders(); }, { permission: "CUSTOM_ORDERS_VIEW" });
   handle("pos:create-custom-order", (raw) => {
     requireCapability("GIFT_BUILDER");
@@ -383,8 +533,8 @@ export function registerIpc(
   handle("pos:create-custom-order-quotation", (raw) => {
     requireCapability("QUOTATIONS");
     sync.assertCanTransact();
-    const { id } = z.object({ id: z.string().min(1) }).parse(raw);
-    return database.queueCustomOrderCommand(id, "CREATE_CUSTOM_ORDER_QUOTATION", "QUOTED");
+    const input = customOrderQuotationSchema.parse(raw);
+    return database.queueCustomOrderCommand(input.id, "CREATE_CUSTOM_ORDER_QUOTATION", "AWAITING_CUSTOMER_APPROVAL", input);
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:reserve-custom-order-materials", (raw) => {
     requireCapability("PRODUCTION");
@@ -393,6 +543,14 @@ export function registerIpc(
     return database.queueCustomOrderCommand(id, "RESERVE_CUSTOM_ORDER_MATERIALS", "MATERIALS_RESERVED");
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:list-invoices", () => database.listInvoices(), { permission: "INVOICES_VIEW" });
+  handle("pos:lookup-invoice", (raw) => database.lookupInvoice(invoiceLookupSchema.parse(raw).reference), { permission: "INVOICES_VIEW" });
+  handle("pos:correct-invoice-details", (raw) => {
+    if (gateway.enabled()) throw new Error("INVOICE_CORRECTION_REQUIRES_SOLO_MODE");
+    const user = access.require("REGISTER_MANAGE");
+    const result = database.correctInvoiceDetails({ ...invoiceCorrectionSchema.parse(raw), operatorId: user.id, operatorName: user.name });
+    access.audit("INVOICE_DETAILS_CORRECTED", "Sale", (result as any).id, { revision: (result as any).revision });
+    return result;
+  }, { permission: "REGISTER_MANAGE" });
   handle("pos:list-stock-entries", () => database.listStockEntries(), { permission: "STOCK_RECEIVE" });
   handle("pos:create-stock-entry", (raw) => {
     const user = access.require("STOCK_RECEIVE");
@@ -488,7 +646,7 @@ export function registerIpc(
   }, { permission: ["POS_SELL", "INVOICES_VIEW", "SETTINGS_MANAGE"] });
   handle("pos:preview-invoice", (raw) => {
     const input = documentSchema.parse(raw);
-    return previewInvoice(database, input.source, input.id);
+    return previewInvoice(database, input.source, input.id, input.settings);
   }, { permission: "INVOICES_VIEW" });
   handle("pos:print-invoice", (raw) => {
     const input = documentSchema.parse(raw);

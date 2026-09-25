@@ -52,6 +52,7 @@ export type Product = {
   available: number;
   visible_in_pos: number;
   active: number;
+  price_on_request: number;
 };
 
 export type CartLine = { product: Product; quantity: number };

@@ -267,6 +267,7 @@ export function PosScreen({
                     </div>
                     <div className="product-copy">
                       <strong>{localized(product)}</strong>
+                      {product.price_on_request ? <em className="badge warning">{t("priceOnRequest")}</em> : null}
                       <small>
                         {product.variant_name || product.sku || t("standard")}
                       </small>
@@ -364,6 +365,7 @@ export function PosScreen({
                   <div className="line-copy">
                     <strong>{localized(line.product)}</strong>
                     <small>{line.product.variant_name || t("standard")}</small>
+                    {line.product.price_on_request ? <em className="badge warning">{t("priceOnRequest")}</em> : null}
                     <b>
                       {money(
                         Math.max(

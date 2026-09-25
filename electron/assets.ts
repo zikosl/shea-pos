@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { PosDatabase } from "./database";
 
@@ -14,6 +14,7 @@ const MIME_EXTENSIONS: Record<string, string> = {
 export class ProductAssetService {
   readonly root: string;
   private readonly productsRoot: string;
+  private readonly draftsRoot: string;
   private running: Promise<void> | null = null;
 
   constructor(
@@ -22,10 +23,49 @@ export class ProductAssetService {
   ) {
     this.root = path.join(userDataPath, "assets");
     this.productsRoot = path.join(this.root, "products");
+    this.draftsRoot = path.join(this.root, "catalog-drafts");
   }
 
   async initialize() {
     await mkdir(this.productsRoot, { recursive: true });
+    await mkdir(this.draftsRoot, { recursive: true });
+  }
+
+  async importCatalogDraft(sourcePath: string) {
+    await this.initialize();
+    const extension = path.extname(sourcePath).toLowerCase();
+    const mimeType = extension === ".png" ? "image/png"
+      : extension === ".webp" ? "image/webp"
+        : extension === ".jpg" || extension === ".jpeg" ? "image/jpeg"
+          : "";
+    if (!mimeType) throw new Error("Unsupported image format. Use JPG, PNG, or WebP");
+    const details = await stat(sourcePath);
+    if (!details.isFile() || !details.size || details.size > MAX_IMAGE_BYTES)
+      throw new Error("Image must be smaller than 8 MB");
+    const bytes = await readFile(sourcePath);
+    const checksum = createHash("sha256").update(bytes).digest("hex");
+    const filename = `${checksum.slice(0, 24)}-${randomUUID().slice(0, 8)}${extension === ".jpeg" ? ".jpg" : extension}`;
+    const relativePath = path.posix.join("catalog-drafts", filename);
+    await writeFile(path.join(this.root, relativePath), bytes, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    return {
+      ref: `draft:${relativePath}`,
+      previewUrl: `shea-asset://local/${relativePath}`,
+      filename,
+      mimeType,
+    };
+  }
+
+  async readCatalogDraft(reference: string) {
+    if (!reference.startsWith("draft:catalog-drafts/")) throw new Error("Invalid catalog draft image");
+    const relativePath = reference.slice("draft:".length);
+    const target = path.resolve(this.root, relativePath);
+    const draftsRoot = `${path.resolve(this.draftsRoot)}${path.sep}`;
+    if (!target.startsWith(draftsRoot)) throw new Error("Unsafe catalog draft image path");
+    const extension = path.extname(target).toLowerCase();
+    const mimeType = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : "image/jpeg";
+    return { bytes: await readFile(target), filename: path.basename(target), mimeType };
   }
 
   localizeActiveProducts() {

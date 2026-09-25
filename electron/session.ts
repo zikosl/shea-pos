@@ -5,6 +5,7 @@ export type Session = {
   endpoint: string;
   accessToken: string;
   refreshToken: string;
+  tokenId?: string;
   accessTokenExpires?: string;
   user: { id: number; email?: string; role: string };
   offlineUntil?: string;

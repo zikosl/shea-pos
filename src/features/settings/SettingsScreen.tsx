@@ -7,6 +7,8 @@ import {
   RefreshCw,
   ScanBarcode,
   Network,
+  MonitorSmartphone,
+  LogOut,
   ShieldCheck,
   TriangleAlert,
   Unplug,
@@ -35,6 +37,15 @@ const defaults: Record<string, string> = {
   receiptShowCustomer: "true",
   receiptShowSku: "true",
   receiptShowTendered: "true",
+  receiptShowNote: "true",
+  receiptPreset: "standard",
+  receiptDensity: "standard",
+  receiptTextSize: "standard",
+  receiptMargin: "standard",
+  receiptLogoSize: "medium",
+  receiptCodeType: "qr",
+  receiptCodePosition: "footer",
+  receiptCodeAlignment: "center",
   labelWidth: "50",
   labelHeight: "30",
   labelShowLogo: "false",
@@ -45,6 +56,14 @@ const defaults: Record<string, string> = {
   deploymentMode: "solo",
   gatewayUrl: "http://127.0.0.1:3510",
 };
+
+function settingsDraft(values: Record<string, string>) {
+  const merged = { ...defaults, ...values };
+  for (const [key, fallback] of Object.entries(defaults)) {
+    if (!merged[key]) merged[key] = fallback;
+  }
+  return merged;
+}
 
 export function SettingsScreen({
   values,
@@ -57,9 +76,10 @@ export function SettingsScreen({
 }) {
   const { t, language } = useI18n();
   const [printers, setPrinters] = useState<any[]>([]);
-  const [draft, setDraft] = useState({ ...defaults, ...values });
+  const [draft, setDraft] = useState(() => settingsDraft(values));
   const [tab, setTab] = useState<PrintTab>("receipt");
   const [previewHtml, setPreviewHtml] = useState("");
+  const [previewRevision, setPreviewRevision] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [loadingPrinters, setLoadingPrinters] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -70,8 +90,11 @@ export function SettingsScreen({
   const [stores, setStores] = useState<StoreNetwork[]>([]);
   const [selectedStoreId, setSelectedStoreId] = useState("");
   const [gatewayCredential, setGatewayCredential] = useState<any>(null);
+  const [accountSessions, setAccountSessions] = useState<any[]>([]);
+  const [currentTokenId, setCurrentTokenId] = useState("");
+  const [sessionsLoading, setSessionsLoading] = useState(true);
 
-  useEffect(() => setDraft({ ...defaults, ...values }), [values]);
+  useEffect(() => setDraft(settingsDraft(values)), [values]);
 
   function loadPrinters() {
     setLoadingPrinters(true);
@@ -89,6 +112,38 @@ export function SettingsScreen({
   }
 
   useEffect(loadGatewayStatus, [values.deploymentMode, values.gatewayUrl]);
+
+  function loadAccountSessions() {
+    setSessionsLoading(true);
+    void window.pos.listAccountSessions()
+      .then((result) => { setAccountSessions(result.sessions); setCurrentTokenId(result.currentTokenId || ""); })
+      .catch((value) => onNotice(localizeError(language, value)))
+      .finally(() => setSessionsLoading(false));
+  }
+
+  useEffect(loadAccountSessions, []);
+
+  async function revokeSession(tokenId: string) {
+    if (!window.confirm(t("signOutDeviceConfirm"))) return;
+    try {
+      await window.pos.revokeAccountSession({ tokenId });
+      onNotice(t("deviceSignedOut"));
+      loadAccountSessions();
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    }
+  }
+
+  async function revokeOtherSessions() {
+    if (!window.confirm(t("signOutOtherDevicesConfirm"))) return;
+    try {
+      await window.pos.revokeOtherAccountSessions();
+      onNotice(t("otherDevicesSignedOut"));
+      loadAccountSessions();
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    }
+  }
 
   function applyStoreNetwork(rows: StoreNetwork[]) {
       setStores(rows);
@@ -112,7 +167,11 @@ export function SettingsScreen({
           ? window.pos.previewReceipt({ settings: draft })
           : window.pos.previewPriceLabel({ settings: draft });
       void request
-        .then((html) => current && setPreviewHtml(html))
+        .then((html) => {
+          if (!current) return;
+          setPreviewHtml(html);
+          setPreviewRevision((revision) => revision + 1);
+        })
         .catch((value) =>
           current && onNotice(localizeError(language, value)),
         )
@@ -130,12 +189,55 @@ export function SettingsScreen({
     if (applyImmediately) onChange(next);
   }
 
+  function changeReceipt(key: string, value: string) {
+    setDraft((current) => ({ ...current, receiptPreset: "custom", [key]: value }));
+  }
+
+  function applyReceiptPreset(preset: "compact" | "standard" | "detailed") {
+    const presetValues = {
+      compact: {
+        receiptDensity: "compact",
+        receiptTextSize: "small",
+        receiptMargin: "small",
+        receiptLogoSize: "small",
+        receiptShowCustomer: "false",
+        receiptShowSku: "false",
+        receiptShowTendered: "false",
+        receiptShowNote: "false",
+        receiptCodeType: "barcode",
+      },
+      standard: {
+        receiptDensity: "standard",
+        receiptTextSize: "standard",
+        receiptMargin: "standard",
+        receiptLogoSize: "medium",
+        receiptShowCustomer: "true",
+        receiptShowSku: "true",
+        receiptShowTendered: "true",
+        receiptShowNote: "true",
+        receiptCodeType: "qr",
+      },
+      detailed: {
+        receiptDensity: "comfortable",
+        receiptTextSize: "large",
+        receiptMargin: "large",
+        receiptLogoSize: "large",
+        receiptShowCustomer: "true",
+        receiptShowSku: "true",
+        receiptShowTendered: "true",
+        receiptShowNote: "true",
+        receiptCodeType: "both",
+      },
+    }[preset];
+    setDraft((current) => ({ ...current, receiptPreset: preset, ...presetValues }));
+  }
+
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true);
     try {
       const result = await window.pos.updateSettings(draft);
-      setDraft({ ...defaults, ...result });
+      setDraft(settingsDraft(result));
       onChange(result);
       onNotice(t("settingsSaved"));
     } catch (value) {
@@ -185,7 +287,7 @@ export function SettingsScreen({
       });
       setPairingCode("");
       const next = await window.pos.updateSettings({ deploymentMode: "multi", gatewayUrl: draft.gatewayUrl });
-      setDraft({ ...defaults, ...next });
+      setDraft(settingsDraft(next));
       onChange(next);
       setGatewayStatus(status);
       onNotice(t("gatewayPaired"));
@@ -201,7 +303,7 @@ export function SettingsScreen({
     try {
       await window.pos.disconnectGateway();
       const next = await window.pos.updateSettings({ deploymentMode: "solo" });
-      setDraft({ ...defaults, ...next });
+      setDraft(settingsDraft(next));
       onChange(next);
       setGatewayStatus({ mode: "solo", connected: true });
       onNotice(t("gatewayDisconnected"));
@@ -386,6 +488,33 @@ export function SettingsScreen({
           <button type="button" className="button secondary" disabled={loadingPrinters} onClick={loadPrinters}><RefreshCw />{t("refreshPrinters")}</button>
           <div className="info"><SlidersHorizontal /><p><strong>{t("windowsDriverTitle")}</strong><br />{t("windowsDriverHelp")}</p></div>
         </section>
+
+        <section className="panel settings-section account-sessions-section">
+          <div className="section-title">
+            <div className="section-icon"><MonitorSmartphone /></div>
+            <div><h3>{t("loggedInDevices")}</h3><p>{t("loggedInDevicesHelp")}</p></div>
+          </div>
+          {sessionsLoading ? <LoadingState label={t("loading")} compact /> : accountSessions.length ? (
+            <div className="account-session-list">
+              {accountSessions.map((session) => {
+                const current = session.id === currentTokenId;
+                return <div className="account-session-row" key={session.id}>
+                  <div className="account-session-icon"><MonitorSmartphone /></div>
+                  <div className="account-session-copy">
+                    <strong>{session.deviceName || t("unknownDevice")}</strong>
+                    <span>{session.platform || t("unknownPlatform")} · {new Date(session.lastSeenAt).toLocaleString()}</span>
+                    {session.ipAddress ? <small>{session.ipAddress}{session.appVersion ? ` · v${session.appVersion}` : ""}</small> : null}
+                  </div>
+                  {current ? <span className="status-pill success">{t("thisDevice")}</span> : <button type="button" className="icon-button danger" title={t("signOutDevice")} onClick={() => void revokeSession(session.id)}><LogOut /></button>}
+                </div>;
+              })}
+            </div>
+          ) : <p className="muted-copy">{t("noLoggedInDevices")}</p>}
+          <div className="gateway-actions">
+            <button type="button" className="button ghost" disabled={sessionsLoading} onClick={loadAccountSessions}><RefreshCw />{t("refresh")}</button>
+            {accountSessions.some((session) => session.id !== currentTokenId) ? <button type="button" className="button secondary danger" onClick={() => void revokeOtherSessions()}><LogOut />{t("signOutOtherDevices")}</button> : null}
+          </div>
+        </section>
       </div>
 
       <section className="panel print-studio">
@@ -404,13 +533,39 @@ export function SettingsScreen({
           <div className="print-controls">
             {tab === "receipt" ? (
               <>
-                <label>{t("paperWidth")}<select value={draft.receiptPaperWidth} onChange={(event) => change("receiptPaperWidth", event.target.value)}><option value="58">58 mm</option><option value="80">80 mm</option></select></label>
+                <div className="receipt-control-group">
+                  <div className="receipt-control-heading"><strong>{t("receiptPreset")}</strong><small>{t("receiptPresetHelp")}</small></div>
+                  <div className="receipt-presets" role="group" aria-label={t("receiptPreset")}>
+                    {(["compact", "standard", "detailed"] as const).map((preset) => (
+                      <button key={preset} type="button" className={draft.receiptPreset === preset ? "active" : ""} onClick={() => applyReceiptPreset(preset)}>{t(preset)}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="receipt-control-group">
+                  <div className="receipt-control-heading"><strong>{t("receiptLayout")}</strong><small>{t("receiptLayoutHelp")}</small></div>
+                  <div className="two-fields">
+                    <label>{t("paperWidth")}<select value={draft.receiptPaperWidth} onChange={(event) => changeReceipt("receiptPaperWidth", event.target.value)}><option value="58">58 mm</option><option value="80">80 mm</option></select></label>
+                    <label>{t("receiptDensity")}<select value={draft.receiptDensity} onChange={(event) => changeReceipt("receiptDensity", event.target.value)}><option value="compact">{t("compact")}</option><option value="standard">{t("standard")}</option><option value="comfortable">{t("comfortable")}</option></select></label>
+                    <label>{t("receiptTextSize")}<select value={draft.receiptTextSize} onChange={(event) => changeReceipt("receiptTextSize", event.target.value)}><option value="small">{t("small")}</option><option value="standard">{t("standard")}</option><option value="large">{t("large")}</option></select></label>
+                    <label>{t("receiptMargin")}<select value={draft.receiptMargin} onChange={(event) => changeReceipt("receiptMargin", event.target.value)}><option value="small">{t("small")}</option><option value="standard">{t("standard")}</option><option value="large">{t("large")}</option></select></label>
+                    <label>{t("receiptLogoSize")}<select value={draft.receiptLogoSize} onChange={(event) => changeReceipt("receiptLogoSize", event.target.value)}><option value="small">{t("small")}</option><option value="medium">{t("medium")}</option><option value="large">{t("large")}</option></select></label>
+                  </div>
+                </div>
+                <div className="receipt-control-group">
+                  <div className="receipt-control-heading"><strong>{t("invoiceCode")}</strong><small>{t("invoiceCodeHelp")}</small></div>
+                  <div className="two-fields">
+                    <label>{t("codeType")}<select value={draft.receiptCodeType} onChange={(event) => changeReceipt("receiptCodeType", event.target.value)}><option value="none">{t("noCode")}</option><option value="qr">{t("qrCode")}</option><option value="barcode">{t("barcode")}</option><option value="both">{t("qrAndBarcode")}</option></select></label>
+                    <label>{t("codePosition")}<select disabled={draft.receiptCodeType === "none"} value={draft.receiptCodePosition} onChange={(event) => changeReceipt("receiptCodePosition", event.target.value)}><option value="header">{t("belowHeader")}</option><option value="beforeTotals">{t("beforeTotals")}</option><option value="footer">{t("afterTotals")}</option></select></label>
+                    <label>{t("codeAlignment")}<select disabled={draft.receiptCodeType === "none"} value={draft.receiptCodeAlignment} onChange={(event) => changeReceipt("receiptCodeAlignment", event.target.value)}><option value="start">{t("alignStart")}</option><option value="center">{t("alignCenter")}</option><option value="end">{t("alignEnd")}</option></select></label>
+                  </div>
+                </div>
                 <label>{t("receiptHeader")}<textarea value={draft.receiptHeader || ""} onChange={(event) => change("receiptHeader", event.target.value)} /></label>
                 <label>{t("receiptFooter")}<textarea value={draft.receiptFooter || ""} onChange={(event) => change("receiptFooter", event.target.value)} /></label>
-                <Toggle label={t("showLogo")} value={draft.receiptShowLogo} onChange={(value) => change("receiptShowLogo", value)} />
-                <Toggle label={t("showCustomer")} value={draft.receiptShowCustomer} onChange={(value) => change("receiptShowCustomer", value)} />
-                <Toggle label={t("showSku")} value={draft.receiptShowSku} onChange={(value) => change("receiptShowSku", value)} />
-                <Toggle label={t("showTenderedChange")} value={draft.receiptShowTendered} onChange={(value) => change("receiptShowTendered", value)} />
+                <Toggle label={t("showLogo")} value={draft.receiptShowLogo} onChange={(value) => changeReceipt("receiptShowLogo", value)} />
+                <Toggle label={t("showCustomer")} value={draft.receiptShowCustomer} onChange={(value) => changeReceipt("receiptShowCustomer", value)} />
+                <Toggle label={t("showNote")} value={draft.receiptShowNote} onChange={(value) => changeReceipt("receiptShowNote", value)} />
+                <Toggle label={t("showSku")} value={draft.receiptShowSku} onChange={(value) => changeReceipt("receiptShowSku", value)} />
+                <Toggle label={t("showTenderedChange")} value={draft.receiptShowTendered} onChange={(value) => changeReceipt("receiptShowTendered", value)} />
               </>
             ) : (
               <>
@@ -429,7 +584,7 @@ export function SettingsScreen({
           <div className="print-preview-panel">
             <div className="print-preview-toolbar"><span><i />{t("livePreview")}</span><small>{tab === "receipt" ? `${draft.receiptPaperWidth} mm` : `${draft.labelWidth} × ${draft.labelHeight} mm`}</small></div>
             <div className={`print-preview-canvas ${tab}`}>
-              {previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe title={t("livePreview")} srcDoc={previewHtml} sandbox="" />}
+              {previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe key={`${tab}-${previewRevision}`} title={t("livePreview")} srcDoc={previewHtml} sandbox="" />}
             </div>
           </div>
         </div>

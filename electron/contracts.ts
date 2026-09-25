@@ -51,6 +51,7 @@ export type ActivateProductInput = {
   trackInventory: boolean;
   reorderThreshold?: number;
   visibleInPos?: boolean;
+  priceOnRequest?: boolean;
 };
 
 export type CreateLocalProductInput = {
@@ -68,6 +69,22 @@ export type CreateLocalProductInput = {
   stock: number;
   trackInventory: boolean;
   reorderThreshold?: number;
+  priceOnRequest?: boolean;
+};
+
+export type CreateLocalProductBundleInput = Omit<CreateLocalProductInput, "variantName" | "sku" | "image" | "price" | "costPrice" | "stock" | "reorderThreshold" | "priceOnRequest"> & {
+  images: string[];
+  variants: Array<{
+    name: string;
+    tags: string[];
+    sku: string;
+    image?: string;
+    price: number;
+    costPrice?: number;
+    stock: number;
+    reorderThreshold?: number;
+    priceOnRequest?: boolean;
+  }>;
 };
 
 export type CreateStockEntryInput = {
@@ -104,6 +121,25 @@ export type CreateCustomOrderInput = {
   tasks?: string[];
 };
 
+export type CreateCustomOrderQuotationInput = {
+  id: string;
+  proposedFor?: string;
+  validUntil?: string;
+  preparationStartsAt?: string;
+  discount?: number;
+  note?: string;
+  lines: Array<{ productId?: number; name: string; description?: string; quantity: number; unitPrice: number }>;
+};
+
+export type InvoiceDetailsCorrectionInput = {
+  id: string;
+  customerName?: string;
+  note?: string;
+  reason: string;
+  operatorId?: string;
+  operatorName?: string;
+};
+
 export type PosApi = {
   updateStatus(): Promise<import("./updater").UpdateStatus>;
   checkForUpdate(): Promise<import("./updater").UpdateStatus>;
@@ -125,8 +161,12 @@ export type PosApi = {
     deviceName: string;
   }): Promise<unknown>;
   signOut(): Promise<void>;
+  listAccountSessions(): Promise<{ sessions: import("./graphql").AccountSession[]; currentTokenId: string }>;
+  revokeAccountSession(input: { tokenId: string }): Promise<void>;
+  revokeOtherAccountSessions(): Promise<void>;
   setupLocalOwner(input: { name: string; username: string; secret: string }): Promise<unknown>;
   localLogin(input: { username: string; secret: string }): Promise<unknown>;
+  recoverLocalOwner(input: { username: string; partnerPassword: string; secret: string }): Promise<unknown>;
   localLogout(): Promise<void>;
   localTouch(): Promise<void>;
   getAccessModel(): Promise<{ permissions: Permission[]; rolePermissions: Record<LocalRole, Permission[]> }>;
@@ -164,15 +204,21 @@ export type PosApi = {
   }): Promise<unknown[]>;
   activateProduct(input: ActivateProductInput): Promise<unknown>;
   createLocalProduct(input: CreateLocalProductInput): Promise<unknown>;
+  createLocalProductBundle(input: CreateLocalProductBundleInput): Promise<unknown[]>;
+  selectCatalogImage(): Promise<{ ref: string; previewUrl: string; filename: string; mimeType: string } | null>;
   getOverview(input?: { from?: string; to?: string }): Promise<unknown>;
   listSales(): Promise<unknown[]>;
   listOrders(): Promise<unknown[]>;
+  transitionOnlineOrder(input: { id: number; status: "PARTNER_ACCEPTED" | "PREPARING" | "READY"; expectedVersion: number }): Promise<unknown>;
+  createOnlineOrderQuotation(input: { id: number; expectedVersion: number; note?: string; lines: Array<{ orderItemId: number; unitPrice: number }> }): Promise<unknown>;
   listGiftOrders(): Promise<unknown[]>;
   createCustomOrder(input: CreateCustomOrderInput): Promise<unknown>;
   transitionCustomOrder(input: { id: string; status: string }): Promise<unknown>;
-  createCustomOrderQuotation(input: { id: string }): Promise<unknown>;
+  createCustomOrderQuotation(input: CreateCustomOrderQuotationInput): Promise<unknown>;
   reserveCustomOrderMaterials(input: { id: string }): Promise<unknown>;
   listInvoices(): Promise<unknown[]>;
+  lookupInvoice(input: { reference: string }): Promise<unknown>;
+  correctInvoiceDetails(input: Omit<InvoiceDetailsCorrectionInput, "operatorId" | "operatorName">): Promise<unknown>;
   listStockEntries(): Promise<unknown[]>;
   createStockEntry(input: CreateStockEntryInput): Promise<unknown>;
   cancelStockEntry(id: string): Promise<unknown>;
@@ -207,6 +253,7 @@ export type PosApi = {
     trackInventory?: boolean;
     available?: boolean;
     visibleInPos?: boolean;
+    priceOnRequest?: boolean;
     active?: boolean;
   }): Promise<unknown>;
   refreshProductImage(input: { productLocalId: string }): Promise<unknown>;
@@ -220,6 +267,7 @@ export type PosApi = {
   previewInvoice(input: {
     source: "POS" | "DELIVERY";
     id: string;
+    settings?: Record<string, string>;
   }): Promise<string>;
   printInvoice(input: {
     source: "POS" | "DELIVERY";

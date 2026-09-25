@@ -189,7 +189,7 @@ export default function App() {
       const synced = (await window.pos.sync({ forceRetry: true })) as Partial<AppState>;
       // Sync refreshes server data; the local operator session stays active.
       setState((current) => ({ ...current, ...synced, localAccess: current.localAccess }));
-      setNotice(t("everythingUpToDate"));
+      setNotice(synced.pendingChanges ? t("syncPending") : t("everythingUpToDate"));
     } catch (error) {
       setNotice(localizeError(language, error));
       await refreshState();
@@ -574,7 +574,7 @@ export default function App() {
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen />}
             {page === "sales" && (
-              <InvoicesScreen onNotice={setNotice} settings={settings} />
+              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} />
             )}
             {page === "reports" && <ReportsScreen onNotice={setNotice} />}
             {page === "requests" && (

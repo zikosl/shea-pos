@@ -195,6 +195,16 @@ export class LocalAccessService {
     this.audit("ACCESS_CODE_RESET", "LocalUser", id);
   }
 
+  recoverOwnerSecret(username: string, secret: string) {
+    const row = this.database.db.prepare(
+      "SELECT id FROM local_users WHERE username=? AND role='OWNER' AND active=1",
+    ).get(normalizeUsername(username)) as { id: string } | undefined;
+    if (!row) throw new Error("Active local owner not found");
+    this.database.db.prepare("UPDATE local_users SET password_hash=?,failed_attempts=0,locked_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .run(hashSecret(secret), row.id);
+    this.audit("OWNER_ACCESS_RECOVERED", "LocalUser", row.id);
+  }
+
   listAudit() {
     return this.database.db.prepare("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 500").all();
   }

@@ -10,8 +10,8 @@ import type { CapabilityCode } from "../../../electron/contracts";
 
 type ViewMode = "AGENDA" | "WEEK" | "MONTH";
 type Order = { id: string; order_number: string; customer_name: string; status: string; required_at?: string; fulfillment_mode: string; total: number; sync_state: string; payload_json: string; niche_id?: number | null };
-type CatalogProduct = { local_id: string; name: string; variant_name?: string | null; price: number; stock: number; available: number | boolean; image?: string | null };
-type GiftLine = { id: string; productLocalId?: string; name: string; description?: string; quantity: number; unitPrice: number };
+type CatalogProduct = { local_id: string; name: string; variant_name?: string | null; price: number; price_on_request?: number | boolean; stock: number; available: number | boolean; image?: string | null };
+type GiftLine = { id: string; productId?: number; productLocalId?: string; name: string; description?: string; quantity: number; unitPrice: number };
 type Niche = { id: number; name: string; name_ar?: string };
 const nextStatus: Record<string, string | undefined> = { QUOTED: "AWAITING_CUSTOMER_APPROVAL", AWAITING_CUSTOMER_APPROVAL: "CONFIRMED", MATERIALS_RESERVED: "IN_PREPARATION", IN_PREPARATION: "READY", READY: "FULFILLED" };
 const dayStart = (date: Date) => { const value = new Date(date); value.setHours(0, 0, 0, 0); return value; };
@@ -27,7 +27,7 @@ export function GiftStoreScreen({ capabilities, canManage, syncVersion }: { capa
   const [rows, setRows] = useState<Order[]>([]), [query, setQuery] = useState(""), [loading, setLoading] = useState(true), [error, setError] = useState("");
   const [view, setView] = useState<ViewMode>("MONTH"), [cursor, setCursor] = useState(dayStart(new Date()));
   const [niches, setNiches] = useState<Niche[]>([]), [nicheFilter, setNicheFilter] = useState("");
-  const [creating, setCreating] = useState(false), [selected, setSelected] = useState<Order | null>(null), [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false), [selected, setSelected] = useState<Order | null>(null), [quoting, setQuoting] = useState<Order | null>(null), [busy, setBusy] = useState(false);
   const load = async () => { setLoading(true); setError(""); try { setRows((await window.pos.listGiftOrders()) as Order[]); } catch (value) { setError(localizeError(language, value)); } finally { setLoading(false); } };
   useEffect(() => { void load(); }, [syncVersion]);
   useEffect(() => {
@@ -46,7 +46,7 @@ export function GiftStoreScreen({ capabilities, canManage, syncVersion }: { capa
   const planned = filtered.filter((row) => Boolean(row.required_at)).length;
   const unscheduled = filtered.length - planned;
   async function transition(order: Order, status: string) { setBusy(true); try { await window.pos.transitionCustomOrder({ id: order.id, status }); setSelected(null); await load(); } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); } }
-  async function command(order: Order, type: "QUOTE" | "RESERVE") { setBusy(true); try { if (type === "QUOTE") await window.pos.createCustomOrderQuotation({ id: order.id }); else await window.pos.reserveCustomOrderMaterials({ id: order.id }); setSelected(null); await load(); } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); } }
+  async function reserve(order: Order) { setBusy(true); try { await window.pos.reserveCustomOrderMaterials({ id: order.id }); setSelected(null); await load(); } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); } }
   return <div className="page-stack gift-workspace">
     <PageHeader eyebrow={t("giftStore")} title={t("customOrders")} description={t("customOrdersText")} actions={canManage && capabilities.includes("GIFT_BUILDER") ? <button className="button primary" onClick={() => setCreating(true)}><Plus />{t("newCustomOrder")}</button> : null} />
     <section className="planner-controls panel">
@@ -55,7 +55,8 @@ export function GiftStoreScreen({ capabilities, canManage, syncVersion }: { capa
     </section>
     {loading ? <div className="panel"><LoadingState label={t("loadingData")} /></div> : error ? <div className="panel"><ErrorState title={t("unableToLoad")} text={error} retryLabel={t("retry")} onRetry={() => void load()} /></div> : !filtered.length ? <div className="panel"><EmptyState icon={Gift} title={t("noCustomOrders")} text={t("noCustomOrdersText")} /></div> : <Planner rows={filtered} view={view} cursor={cursor} setCursor={setCursor} onSelect={setSelected} />}
     {creating ? <OrderWizard onClose={() => setCreating(false)} onCreated={async () => { setCreating(false); await load(); }} /> : null}
-    {selected ? <OrderDrawer order={selected} busy={busy} capabilities={capabilities} canManage={canManage} onClose={() => setSelected(null)} onTransition={(status) => void transition(selected, status)} onCommand={(type) => void command(selected, type)} /> : null}
+    {selected ? <OrderDrawer order={selected} busy={busy} capabilities={capabilities} canManage={canManage} onClose={() => setSelected(null)} onTransition={(status) => void transition(selected, status)} onQuote={() => setQuoting(selected)} onReserve={() => void reserve(selected)} /> : null}
+    {quoting ? <QuotationDialog order={quoting} onClose={() => setQuoting(null)} onSubmitted={async () => { setQuoting(null); setSelected(null); await load(); }} /> : null}
   </div>;
 }
 
@@ -111,7 +112,7 @@ function OrderWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
       const found = current.find((line) => line.productLocalId === product.local_id);
       return found
         ? current.map((line) => line.productLocalId === product.local_id ? { ...line, quantity: line.quantity + 1 } : line)
-        : [...current, { id: product.local_id, productLocalId: product.local_id, name: product.variant_name ? `${product.name} - ${product.variant_name}` : product.name, quantity: 1, unitPrice: Number(product.price) }];
+        : [...current, { id: product.local_id, productLocalId: product.local_id, name: product.variant_name ? `${product.name} - ${product.variant_name}` : product.name, quantity: 1, unitPrice: product.price_on_request ? 0 : Number(product.price) }];
     });
   }
 
@@ -161,7 +162,7 @@ function OrderWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
             <div className="catalog-picker">
               <div><strong>{t("addFromCatalog")}</strong><small>{t("addFromCatalogText")}</small></div>
               <div className="search"><Search /><input autoFocus value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder={t("searchProducts")} /></div>
-              <div className="catalog-options">{catalog.map((product) => <button type="button" key={product.local_id} disabled={!product.available} onClick={() => addCatalogLine(product)}><span><strong>{product.name}</strong>{product.variant_name ? <small>{product.variant_name}</small> : null}</span><b>{money(product.price)}</b><Plus /></button>)}{!catalog.length ? <small>{t("noNicheProducts")}</small> : null}</div>
+              <div className="catalog-options">{catalog.map((product) => <button type="button" key={product.local_id} disabled={!product.available} onClick={() => addCatalogLine(product)}><span><strong>{product.name}</strong>{product.variant_name ? <small>{product.variant_name}</small> : null}</span><b>{product.price_on_request ? t("priceOnRequest") : money(product.price)}</b><Plus /></button>)}{!catalog.length ? <small>{t("noNicheProducts")}</small> : null}</div>
             </div>
             <div className="custom-line-form form-grid">
               <div className="wide"><strong>{t("addCustomLine")}</strong><small>{t("addCustomLineText")}</small></div>
@@ -196,7 +197,26 @@ function OrderWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   );
 }
 
-function OrderDrawer({ order, busy, capabilities, canManage, onClose, onTransition, onCommand }: { order: Order; busy: boolean; capabilities: CapabilityCode[]; canManage: boolean; onClose: () => void; onTransition: (status: string) => void; onCommand: (type: "QUOTE" | "RESERVE") => void }) {
+function QuotationDialog({ order, onClose, onSubmitted }: { order: Order; onClose: () => void; onSubmitted: () => void }) {
+  const { t, language } = useI18n();
+  let payload: any = {}; try { payload = JSON.parse(order.payload_json); } catch { /* Keep an empty quote draft. */ }
+  const [lines, setLines] = useState<GiftLine[]>((payload.lines ?? []).map((line: any, index: number) => ({ id: line.id ?? String(index), productId: line.productId ?? undefined, name: line.name, description: line.description ?? undefined, quantity: Number(line.quantity), unitPrice: Number(line.unitPrice ?? 0) })));
+  const [proposedFor, setProposedFor] = useState(order.required_at ? new Date(order.required_at).toISOString().slice(0, 16) : "");
+  const [discount, setDiscount] = useState("0");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const subtotal = lines.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0);
+  async function submit() {
+    setBusy(true); setError("");
+    try {
+      await window.pos.createCustomOrderQuotation({ id: order.id, proposedFor: proposedFor ? new Date(proposedFor).toISOString() : undefined, discount: Number(discount) || 0, note: note.trim() || undefined, lines: lines.map(({ id: _id, productLocalId: _local, ...line }) => line) });
+      onSubmitted();
+    } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); }
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><section className="modal-card quotation-dialog" role="dialog" aria-modal="true"><div className="dialog-heading"><div><p className="eyebrow">{order.order_number}</p><h2>{t("createQuotation")}</h2></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="quotation-lines">{lines.map((line, index) => <div className="quotation-line" key={line.id}><span><strong>{line.name}</strong><small>{line.quantity} ×</small></span><label>{t("price")}<input type="number" min="0" step="0.01" value={line.unitPrice} onChange={(event) => setLines((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, unitPrice: Number(event.target.value) } : item))} /></label><b>{money(line.quantity * line.unitPrice)}</b></div>)}</div><div className="form-grid"><label>{t("requiredAt")}<DateTimePicker value={proposedFor} onChange={setProposedFor} min={new Date().toISOString().slice(0, 10)} /></label><label>{t("discount")}<input type="number" min="0" max={subtotal} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} /></label><label className="wide">{t("note")}<textarea value={note} onChange={(event) => setNote(event.target.value)} /></label></div><div className="quotation-total"><span>{t("total")}</span><strong>{money(Math.max(0, subtotal - (Number(discount) || 0)))}</strong></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="button" className="button primary" disabled={busy || !lines.length || !proposedFor || Number(discount) > subtotal} onClick={() => void submit()}>{busy ? <LoaderCircle className="spin" /> : null}{t("createQuotation")}</button></div></section></div>;
+}
+
+function OrderDrawer({ order, busy, capabilities, canManage, onClose, onTransition, onQuote, onReserve }: { order: Order; busy: boolean; capabilities: CapabilityCode[]; canManage: boolean; onClose: () => void; onTransition: (status: string) => void; onQuote: () => void; onReserve: () => void }) {
   const { t, language } = useI18n(); let payload: any = {}; try { payload = JSON.parse(order.payload_json); } catch { /* Retain summary. */ } const next = nextStatus[order.status];
-  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="order-drawer"><div className="dialog-heading"><div><p className="eyebrow">{order.order_number}</p><h2>{order.customer_name}</h2></div><button className="icon-button" onClick={onClose}><X /></button></div><div className="order-summary"><span><small>{t("status")}</small><em className="badge">{localizeValue(language, order.status)}</em></span><span><small>{t("requiredAt")}</small><strong>{order.required_at ? new Date(order.required_at).toLocaleString(localeFor(language)) : "-"}</strong></span><span><small>{t("fulfillment")}</small><strong>{localizeValue(language, order.fulfillment_mode)}</strong></span><span><small>{t("total")}</small><strong>{money(order.total)}</strong></span></div><section><h3>{t("giftDetails")}</h3><p>{payload.gift?.occasion || payload.occasion || "-"}</p><p>{payload.gift?.cardMessage || payload.cardMessage || ""}</p></section><section><h3>{t("items")}</h3>{(payload.lines ?? []).map((line: any, index: number) => <div className="drawer-line" key={line.id ?? index}><span>{line.name}<small>{line.quantity} × {money(line.unitPrice)}</small></span><strong>{money(line.total ?? line.quantity * line.unitPrice)}</strong></div>)}</section>{canManage ? <div className="drawer-actions">{order.status === "REQUESTED" && capabilities.includes("QUOTATIONS") ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onCommand("QUOTE")}>{busy ? <LoaderCircle className="spin" /> : null}{t("createQuotation")}</button> : null}{order.status === "CONFIRMED" && capabilities.includes("PRODUCTION") ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onCommand("RESERVE")}>{busy ? <LoaderCircle className="spin" /> : null}{t("reserveMaterials")}</button> : null}{next ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition(next)}>{busy ? <LoaderCircle className="spin" /> : null}{t("moveToNextStage")}</button> : null}{!["FULFILLED", "CANCELLED"].includes(order.status) ? <button className="button danger" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition("CANCELLED")}>{t("cancelOrder")}</button> : null}{order.sync_state !== "SYNCED" ? <small>{t("syncBeforeWorkflow")}</small> : null}</div> : null}</aside></div>;
+  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="order-drawer"><div className="dialog-heading"><div><p className="eyebrow">{order.order_number}</p><h2>{order.customer_name}</h2></div><button className="icon-button" onClick={onClose}><X /></button></div><div className="order-drawer-content"><div className="order-summary"><span><small>{t("status")}</small><em className="badge">{localizeValue(language, order.status)}</em></span><span><small>{t("requiredAt")}</small><strong>{order.required_at ? new Date(order.required_at).toLocaleString(localeFor(language)) : "-"}</strong></span><span><small>{t("fulfillment")}</small><strong>{localizeValue(language, order.fulfillment_mode)}</strong></span><span><small>{t("total")}</small><strong>{money(order.total)}</strong></span></div><section><h3>{t("giftDetails")}</h3><p>{payload.gift?.occasion || payload.occasion || "-"}</p><p>{payload.gift?.cardMessage || payload.cardMessage || ""}</p></section><section><h3>{t("items")}</h3>{(payload.lines ?? []).map((line: any, index: number) => <div className="drawer-line" key={line.id ?? index}><span>{line.name}<small>{line.quantity} × {money(line.unitPrice)}</small></span><strong>{money(line.total ?? line.quantity * line.unitPrice)}</strong></div>)}</section></div>{canManage ? <div className="drawer-actions">{order.status === "REQUESTED" && capabilities.includes("QUOTATIONS") ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={onQuote}>{t("createQuotation")}</button> : null}{["CONFIRMED", "PREPARATION_DUE"].includes(order.status) && capabilities.includes("PRODUCTION") ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={onReserve}>{busy ? <LoaderCircle className="spin" /> : null}{t("reserveMaterials")}</button> : null}{next ? <button className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition(next)}>{busy ? <LoaderCircle className="spin" /> : null}{t("moveToNextStage")}</button> : null}{!["FULFILLED", "CANCELLED"].includes(order.status) ? <button className="button danger" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition("CANCELLED")}>{t("cancelOrder")}</button> : null}{order.sync_state !== "SYNCED" ? <small>{t("syncBeforeWorkflow")}</small> : null}</div> : null}</aside></div>;
 }

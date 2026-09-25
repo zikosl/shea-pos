@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PosDatabase } from "./database";
-import { graphqlRequest, refreshSession } from "./graphql";
+import { graphqlRequest, refreshSession, uploadGraphqlFile } from "./graphql";
 import { readSession, writeSession, type Session } from "./session";
 import type { ProductAssetService } from "./assets";
 
@@ -94,13 +94,11 @@ export class SyncService {
     this.running = true;
     try {
       let session = await this.activeSession();
-      try {
-        await this.push(session, forceRetry);
-      } catch (error) {
-        if (!String(error).toLowerCase().includes("token")) throw error;
+      let pushErrors = await this.push(session, forceRetry);
+      if (pushErrors.some((message) => message.toLowerCase().includes("token"))) {
         session = await refreshSession(session);
         writeSession(this.database, session);
-        await this.push(session, forceRetry);
+        pushErrors = await this.push(session, true);
       }
       const deviceKey = this.database.getSetting("deviceKey");
       if (!deviceKey) throw new Error("POS device is not activated");
@@ -126,7 +124,7 @@ export class SyncService {
         result.posBootstrap.offlineUntil,
       );
       await this.assets?.localizeActiveProducts();
-      this.database.setSetting("lastSyncError", "");
+      this.database.setSetting("lastSyncError", pushErrors[0] ?? "");
       return this.state();
     } catch (error) {
       this.database.setSetting(
@@ -140,6 +138,7 @@ export class SyncService {
   }
 
   private async push(session: Session, forceRetry = false) {
+    const errors: string[] = [];
     const device = JSON.parse(this.database.getSetting("device") ?? "{}") as {
       id?: string;
     };
@@ -165,6 +164,7 @@ export class SyncService {
             data.submitCatalogProposal.status,
           );
         } else if (row.operation === "SUBMIT_PRODUCT_REQUEST") {
+          await this.uploadCatalogDrafts(row.id, payload, session);
           const data = await graphqlRequest<{
             submitProductTemplateRequest: { id: number; status: string };
           }>(
@@ -181,17 +181,32 @@ export class SyncService {
             },
             session.accessToken,
           );
+          await graphqlRequest<{ createCatalogSubmission: { id: string } }>(
+            session.endpoint,
+            `
+            mutation CreatePosCatalogSubmission($localId: String!, $title: String, $productRequestIds: [Int!]) {
+              createCatalogSubmission(localId: $localId, title: $title, productRequestIds: $productRequestIds) { id }
+            }
+          `,
+            {
+              localId: `pos:${payload.posLocalId}`,
+              title: payload.name,
+              productRequestIds: [data.submitProductTemplateRequest.id],
+            },
+            session.accessToken,
+          );
           this.database.markProductRequestSubmitted(
             row.aggregate_id,
             data.submitProductTemplateRequest.id,
             data.submitProductTemplateRequest.status,
+            payload.productLocalIds,
           );
         } else if (row.operation === "ACTIVATE_PRODUCT") {
           const data = await graphqlRequest<{ createProduct: { id: number } }>(
             session.endpoint,
             `
-            mutation ActivatePosProduct($variantId: Int!, $price: Float, $costPrice: Float, $stock: Int, $trackInventory: Boolean, $reorderThreshold: Int, $isVisibleInPos: Boolean) {
-              createProduct(variantId: $variantId, price: $price, costPrice: $costPrice, stock: $stock, trackInventory: $trackInventory, reorderThreshold: $reorderThreshold, isVisibleInPos: $isVisibleInPos, available: true, isActive: true) { id }
+            mutation ActivatePosProduct($variantId: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $stock: Int, $trackInventory: Boolean, $reorderThreshold: Int, $isVisibleInPos: Boolean) {
+              createProduct(variantId: $variantId, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, stock: $stock, trackInventory: $trackInventory, reorderThreshold: $reorderThreshold, isVisibleInPos: $isVisibleInPos, available: true, isActive: true) { id }
             }
           `,
             {
@@ -279,7 +294,7 @@ export class SyncService {
         } else if (row.operation === "UPDATE_PRODUCT") {
           await graphqlRequest(
             session.endpoint,
-            `mutation UpdatePosProduct($id: Int!, $price: Float, $costPrice: Float, $discount: Float, $stock: Int, $reorderThreshold: Int, $trackInventory: Boolean, $available: Boolean, $isVisibleInPos: Boolean, $isActive: Boolean) { updateProduct(id: $id, price: $price, costPrice: $costPrice, discount: $discount, stock: $stock, reorderThreshold: $reorderThreshold, trackInventory: $trackInventory, available: $available, isVisibleInPos: $isVisibleInPos, isActive: $isActive) { id } }`,
+            `mutation UpdatePosProduct($id: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $discount: Float, $stock: Int, $reorderThreshold: Int, $trackInventory: Boolean, $available: Boolean, $isVisibleInPos: Boolean, $isActive: Boolean) { updateProduct(id: $id, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, discount: $discount, stock: $stock, reorderThreshold: $reorderThreshold, trackInventory: $trackInventory, available: $available, isVisibleInPos: $isVisibleInPos, isActive: $isActive) { id } }`,
             {
               ...payload,
               id: payload.serverId,
@@ -332,6 +347,22 @@ export class SyncService {
             order = transitioned.transitionGiftOrder;
           }
           this.database.markCustomOrderCreated(row.aggregate_id, order);
+        } else if (row.operation === "TRANSITION_ONLINE_ORDER") {
+          const data = await graphqlRequest<{ transitionOrderStatus: any }>(
+            session.endpoint,
+            `mutation TransitionOnlineOrder($id: Int!, $status: OrderStatus!, $expectedVersion: Int!) { transitionOrderStatus(id: $id, status: $status, expectedVersion: $expectedVersion) { id status version subtotal discount appTax deliveryTax storeTax } }`,
+            { id: payload.id, status: payload.status, expectedVersion: payload.expectedVersion },
+            session.accessToken,
+          );
+          this.database.markOnlineOrderSynced(data.transitionOrderStatus);
+        } else if (row.operation === "CREATE_ONLINE_ORDER_QUOTATION") {
+          const data = await graphqlRequest<{ createOrderQuotation: { total: number } }>(
+            session.endpoint,
+            `mutation CreateOnlineOrderQuotation($orderId: Int!, $expectedVersion: Int!, $lines: OrderQuotationLinesInput!, $note: String) { createOrderQuotation(orderId: $orderId, expectedVersion: $expectedVersion, lines: $lines, note: $note) { id status total version } }`,
+            { orderId: payload.id, expectedVersion: payload.expectedVersion, lines: { lines: payload.lines }, note: payload.note },
+            session.accessToken,
+          );
+          this.database.markOnlineOrderSynced({ id: payload.id, status: "AWAITING_CLIENT_APPROVAL", version: payload.expectedVersion + 1, total: data.createOrderQuotation.total });
         } else if (row.operation === "TRANSITION_CUSTOM_ORDER") {
           const data = await graphqlRequest<{ transitionGiftOrder: any }>(
             session.endpoint,
@@ -343,8 +374,16 @@ export class SyncService {
         } else if (row.operation === "CREATE_CUSTOM_ORDER_QUOTATION") {
           await graphqlRequest(
             session.endpoint,
-            `mutation CreateCustomOrderQuotation($id: String!) { createGiftQuotation(customOrderId: $id) { id quoteNumber status total version } }`,
-            { id: payload.serverId },
+            `mutation CreateCustomOrderQuotation($id: String!, $validUntil: DateTime, $proposedFor: DateTime, $preparationStartsAt: DateTime, $discount: Float, $lines: [GiftQuotationLineInput!], $note: String) { createGiftQuotation(customOrderId: $id, validUntil: $validUntil, proposedFor: $proposedFor, preparationStartsAt: $preparationStartsAt, discount: $discount, lines: $lines, note: $note) { id quoteNumber status total version } }`,
+            {
+              id: payload.serverId,
+              validUntil: payload.validUntil,
+              proposedFor: payload.proposedFor,
+              preparationStartsAt: payload.preparationStartsAt,
+              discount: payload.discount,
+              lines: payload.lines,
+              note: payload.note,
+            },
             session.accessToken,
           );
           this.database.markCustomOrderCommandSynced(row.aggregate_id);
@@ -359,11 +398,37 @@ export class SyncService {
         }
         this.database.markOutboxSynced(row.id);
       } catch (error) {
+        const message = error instanceof Error ? error.message : "Sync operation failed";
         this.database.markOutboxError(
           row.id,
-          error instanceof Error ? error.message : "Sync operation failed",
+          message,
         );
+        errors.push(message);
       }
+    }
+    return errors;
+  }
+
+  private async uploadCatalogDrafts(outboxId: string, payload: any, session: Session) {
+    const uploaded = new Map<string, string>();
+    const resolve = async (reference?: string) => {
+      if (!reference?.startsWith("draft:")) return reference;
+      const existing = uploaded.get(reference);
+      if (existing) return existing;
+      if (!this.assets) throw new Error("Catalog image storage is unavailable");
+      const file = await this.assets.readCatalogDraft(reference);
+      const url = await uploadGraphqlFile(session.endpoint, file, session.accessToken);
+      uploaded.set(reference, url);
+      return url;
+    };
+
+    for (let index = 0; index < (payload.images ?? []).length; index += 1) {
+      payload.images[index] = await resolve(payload.images[index]);
+      this.database.updateOutboxPayload(outboxId, payload);
+    }
+    for (const variant of payload.variants ?? []) {
+      variant.image = await resolve(variant.image);
+      this.database.updateOutboxPayload(outboxId, payload);
     }
   }
 
