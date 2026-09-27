@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { app, BrowserWindow, protocol, shell } from "electron";
 import { PosDatabase } from "./database";
 import { registerIpc } from "./ipc";
@@ -13,6 +14,7 @@ import { GatewayService } from "./gateway";
 let mainWindow: BrowserWindow | null = null;
 let database: PosDatabase | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
+let backupTimer: NodeJS.Timeout | null = null;
 let updater: PosUpdater | null = null;
 
 function applicationIcon() {
@@ -65,6 +67,21 @@ function createWindow() {
   return mainWindow;
 }
 
+async function runAutomaticBackup(database: PosDatabase) {
+  const last = Number(database.getSetting("lastAutomaticBackupAt") || 0);
+  if (Date.now() - last < 24 * 60 * 60 * 1000) return;
+  const root = path.join(app.getPath("userData"), "backups");
+  mkdirSync(root, { recursive: true });
+  await database.createBackup(root);
+  database.setSetting("lastAutomaticBackupAt", String(Date.now()));
+  const backups = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("Shea-POS-Backup-"))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+  for (const expired of backups.slice(14)) rmSync(path.join(root, expired), { recursive: true, force: true });
+}
+
 app.setAppUserModelId("com.openzey.shea.pos");
 protocol.registerSchemesAsPrivileged([
   { scheme: "shea-asset", privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -80,7 +97,9 @@ else {
   });
   app.whenReady().then(() => {
     if (process.platform === "darwin") app.dock?.setIcon(applicationIcon());
+    PosDatabase.applyStagedRestore(app.getPath("userData"));
     database = new PosDatabase(app.getPath("userData"));
+    void runAutomaticBackup(database).catch((error) => database?.setSetting("lastBackupError", error instanceof Error ? error.message : "Backup failed"));
     const assets = new ProductAssetService(database, app.getPath("userData"));
     protocol.handle("shea-asset", async (request) => {
       const url = new URL(request.url);
@@ -128,6 +147,7 @@ else {
     syncTimer = setInterval(() => {
       if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     }, 60_000);
+    backupTimer = setInterval(() => database && void runAutomaticBackup(database).catch(() => undefined), 6 * 60 * 60 * 1000);
     if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     else void assets.localizeActiveProducts();
   });
@@ -138,6 +158,7 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   if (syncTimer) clearInterval(syncTimer);
+  if (backupTimer) clearInterval(backupTimer);
   updater?.stop();
   database?.close();
 });

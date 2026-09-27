@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eye, FileClock, LoaderCircle, Pencil, Printer, ReceiptText, ScanLine, Search, X } from "lucide-react";
+import { Eye, FileClock, LoaderCircle, Pencil, Printer, ReceiptText, RotateCcw, ScanLine, Search, X } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
 import { PageHeader } from "../../components/PageHeader";
@@ -126,10 +126,12 @@ export function InvoicesScreen({
   onNotice,
   settings,
   canCorrect,
+  canRefund,
 }: {
   onNotice: (message: string) => void;
   settings: Record<string, string>;
   canCorrect: boolean;
+  canRefund: boolean;
 }) {
   const { t, language } = useI18n();
   const [rows, setRows] = useState<any[]>([]);
@@ -144,6 +146,7 @@ export function InvoicesScreen({
   const [printing, setPrinting] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [correcting, setCorrecting] = useState<any | null>(null);
+  const [refunding, setRefunding] = useState<any | null>(null);
   const load = async () => {
     setLoading(true);
     setError("");
@@ -279,13 +282,36 @@ export function InvoicesScreen({
           <section className="modal-card receipt-preview-dialog" role="dialog" aria-modal="true">
             <div className="receipt-preview-heading"><div><p className="eyebrow">{previewSale.source === "POS" ? t("posInvoice") : t("deliveryInvoice")}</p><h2>{previewSale.number}</h2>{Number(previewSale.revision ?? 1) > 1 ? <small>{t("revision")} {previewSale.revision}</small> : null}</div><button type="button" className="icon-button" aria-label={t("close")} onClick={() => setPreviewSale(null)}><X /></button></div>
             <div className="receipt-preview-canvas">{previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe key={`${previewSale.source}-${previewSale.id}-${previewRevision}`} title={t("previewReceipt")} srcDoc={previewHtml} sandbox="" />}</div>
-            <div className="dialog-actions">{canCorrect && previewSale.source === "POS" ? <button type="button" className="button secondary" disabled={printing || previewLoading} onClick={() => setCorrecting(previewSale)}><Pencil />{t("editInvoiceDetails")}</button> : null}<button type="button" className="button secondary" disabled={printing} onClick={() => setPreviewSale(null)}>{t("close")}</button><button type="button" className="button primary" disabled={printing || previewLoading} onClick={async () => { setPrinting(true); try { await window.pos.printInvoice({ source: previewSale.source, id: String(previewSale.id), printerName: settings.printerName || undefined }); onNotice(t("documentSentToPrinter")); } catch (value) { onNotice(localizeError(language, value)); } finally { setPrinting(false); } }}>{printing ? <LoaderCircle className="spin" /> : <Printer />}{printing ? t("printing") : t("print")}</button></div>
+            <div className="dialog-actions">{canRefund && previewSale.source === "POS" && !["REFUNDED", "VOIDED"].includes(previewSale.status) ? <button type="button" className="button secondary danger" disabled={printing || previewLoading} onClick={() => setRefunding(previewSale)}><RotateCcw />{t("refundSale")}</button> : null}{canCorrect && previewSale.source === "POS" ? <button type="button" className="button secondary" disabled={printing || previewLoading} onClick={() => setCorrecting(previewSale)}><Pencil />{t("editInvoiceDetails")}</button> : null}<button type="button" className="button secondary" disabled={printing} onClick={() => setPreviewSale(null)}>{t("close")}</button><button type="button" className="button primary" disabled={printing || previewLoading} onClick={async () => { setPrinting(true); try { await window.pos.printInvoice({ source: previewSale.source, id: String(previewSale.id), printerName: settings.printerName || undefined }); onNotice(t("documentSentToPrinter")); } catch (value) { onNotice(localizeError(language, value)); } finally { setPrinting(false); } }}>{printing ? <LoaderCircle className="spin" /> : <Printer />}{printing ? t("printing") : t("print")}</button></div>
           </section>
         </div>
       ) : null}
       {correcting ? <InvoiceCorrectionDialog invoice={correcting} onClose={() => setCorrecting(null)} onSaved={(sale) => void corrected(sale)} /> : null}
+      {refunding ? <RefundSaleDialog invoice={refunding} onClose={() => setRefunding(null)} onRefunded={async () => { setRefunding(null); setPreviewSale(null); await load(); onNotice(t("saleRefunded")); }} /> : null}
     </div>
   );
+}
+
+function RefundSaleDialog({ invoice, onClose, onRefunded }: { invoice: any; onClose: () => void; onRefunded: () => void }) {
+  const { t, language } = useI18n();
+  const [details, setDetails] = useState<any | null>(null);
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    window.pos.getSaleDetails(invoice.id).then(setDetails).catch((value) => setError(localizeError(language, value)));
+  }, [invoice.id, language]);
+  const selected = (details?.items ?? []).filter((item: any) => Number(quantities[item.id] ?? 0) > 0);
+  const amount = selected.reduce((sum: number, item: any) => sum + Number(item.total) * (Number(quantities[item.id]) / Number(item.quantity)), 0);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      await window.pos.refundSale({ saleId: invoice.id, reason, lines: selected.map((item: any) => ({ saleItemId: item.id, quantity: Number(quantities[item.id]) })) });
+      onRefunded();
+    } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); }
+  }
+  return <div className="modal-backdrop elevated-modal" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="modal-card refund-dialog" onSubmit={submit}><div className="dialog-heading"><div><p className="eyebrow">{invoice.number}</p><h2>{t("refundSale")}</h2><p>{t("refundSaleHelp")}</p></div><button type="button" className="icon-button" disabled={busy} onClick={onClose}><X /></button></div>{details ? <div className="refund-lines">{details.items.map((item: any) => { const remaining = Number(item.quantity) - Number(item.returned_quantity ?? 0); return <label key={item.id}><span><strong>{item.product_name}</strong><small>{remaining} {t("returnable")}</small></span><input type="number" min="0" max={remaining} step="1" value={quantities[item.id] ?? 0} onChange={(event) => setQuantities((current) => ({ ...current, [item.id]: Math.max(0, Math.min(remaining, Number(event.target.value))) }))} /></label>; })}</div> : !error ? <LoadingState label={t("loadingData")} compact /> : null}<label>{t("refundReason")}<textarea required minLength={3} maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} /></label><div className="quotation-total"><span>{t("cashRefund")}</span><strong>{money(amount)}</strong></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="submit" className="button primary danger" disabled={busy || !selected.length || reason.trim().length < 3}>{busy ? <LoaderCircle className="spin" /> : <RotateCcw />}{t("confirmRefund")}</button></div></form></div>;
 }
 
 function InvoiceCorrectionDialog({ invoice, onClose, onSaved }: { invoice: any; onClose: () => void; onSaved: (sale: any) => void }) {

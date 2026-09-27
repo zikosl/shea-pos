@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app } from "electron";
 import { PosDatabase } from "./database";
 import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
@@ -13,9 +12,7 @@ import {
   previewStockEntry,
 } from "./printer";
 
-app
-  .whenReady()
-  .then(async () => {
+async function main() {
     const root = mkdtempSync(path.join(os.tmpdir(), "shea-pos-test-"));
     const database = new PosDatabase(root);
     try {
@@ -70,6 +67,12 @@ app
       );
       insert.run("tracked", 1, "Tracked item", 100, 60, 5, "TRACKED");
       insert.run("unlimited", 2, "Service item", 50, 10, 0, "UNLIMITED");
+      database.holdCart({ customerName: "Held customer", lines: [{ productLocalId: "tracked", quantity: 1 }] });
+      const held = database.listHeldCarts() as any[];
+      assert.equal(held.length, 1);
+      assert.equal(held[0].payload.lines[0].product.local_id, "tracked");
+      database.deleteHeldCart(held[0].id);
+      assert.equal(database.listHeldCarts().length, 0);
 
       const sale = database.checkout({
         paymentMethod: "CASH",
@@ -132,6 +135,29 @@ app
         350,
       );
 
+      database.db.prepare("UPDATE products SET price_on_request=1 WHERE local_id='tracked'").run();
+      assert.throws(() => database.checkout({ paymentMethod: "CASH", lines: [{ productLocalId: "tracked", quantity: 1 }] }), /PRICE_CONFIRMATION_REQUIRED/);
+      database.db.prepare("UPDATE products SET price_on_request=0 WHERE local_id='tracked'").run();
+      assert.throws(() => database.checkout({ paymentMethod: "CASH", amountTendered: 10, lines: [{ productLocalId: "tracked", quantity: 1 }] }), /INSUFFICIENT_TENDERED_CASH/);
+
+      const saleDetails = database.getSaleDetails(sale.id) as any;
+      const trackedLine = saleDetails.items.find((item: any) => item.product_local_id === "tracked");
+      const refunded = database.refundSale({
+        saleId: sale.id,
+        reason: "Customer returned sealed item",
+        lines: [{ saleItemId: trackedLine.id, quantity: 1 }],
+        operatorId: "test-manager",
+        operatorName: "Test manager",
+      }) as any;
+      assert.equal(refunded.sale.status, "PARTIALLY_REFUNDED");
+      assert.equal(refunded.sale.refunded_total, 100);
+      assert.equal((database.getProductByLocalId("tracked") as any).stock, 4);
+      const netOverview = database.overview({
+        from: new Date(Date.now() - 60_000).toISOString(),
+        to: new Date(Date.now() + 60_000).toISOString(),
+      }) as any;
+      assert.equal(netOverview.summary.revenue, 250);
+
       const salesBeforeFailure = (
         database.db.prepare("SELECT COUNT(*) count FROM sales").get() as any
       ).count;
@@ -139,7 +165,7 @@ app
         () =>
           database.checkout({
             paymentMethod: "CASH",
-            lines: [{ productLocalId: "tracked", quantity: 4 }],
+            lines: [{ productLocalId: "tracked", quantity: 5 }],
           }),
         /insufficient stock/,
       );
@@ -175,9 +201,9 @@ app
         ).operation,
         "SUBMIT_PRODUCT_REQUEST",
       );
-      assert.equal(database.listMovements({}).length, 1);
-      assert.equal((database.getCashSession() as any).expected_cash, 1_350);
-      assert.equal(database.countPendingOutbox(), 4);
+      assert.equal(database.listMovements({}).length, 2);
+      assert.equal((database.getCashSession() as any).expected_cash, 1_250);
+      assert.equal(database.countPendingOutbox(), 5);
       mkdirSync(path.join(root, "assets", "catalog-drafts"), { recursive: true });
       writeFileSync(path.join(root, "assets", "catalog-drafts", "perfume.jpg"), Buffer.from("offline-image"));
       const productBundle = database.createLocalProductBundle({
@@ -358,14 +384,17 @@ app
       const transitioned = database.transitionCustomOrder(customOrder.id, "AWAITING_CUSTOMER_APPROVAL") as any;
       assert.equal(transitioned.status, "AWAITING_CUSTOMER_APPROVAL");
       assert.equal(transitioned.version, 3);
-      console.log("Electron SQLite integration checks passed");
+      const backupPath = await database.createBackup(root);
+      assert.equal(existsSync(path.join(backupPath, "shea-pos.sqlite")), true);
+      assert.equal(existsSync(path.join(backupPath, "assets", "products", "serum.webp")), true);
+      console.log("Shea POS core integration checks passed");
     } finally {
       database.close();
       rmSync(root, { recursive: true, force: true });
-      app.quit();
     }
-  })
-  .catch((error) => {
-    console.error(error);
-    app.exit(1);
-  });
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

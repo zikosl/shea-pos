@@ -114,7 +114,7 @@ function roleDescriptionKey(role: LocalRole): Parameters<ReturnType<typeof useI1
 function permissionLabel(t: ReturnType<typeof useI18n>["t"], permission: Permission) {
   const keys: Record<Permission, Parameters<typeof t>[0]> = {
     POS_SELL: "permissionPosSell", REGISTER_MANAGE: "permissionRegister", ORDERS_VIEW: "permissionOrders",
-    INVOICES_VIEW: "permissionInvoices", INVENTORY_VIEW: "permissionInventoryView", INVENTORY_MANAGE: "permissionInventoryManage",
+    INVOICES_VIEW: "permissionInvoices", SALES_REFUND: "permissionRefunds", INVENTORY_VIEW: "permissionInventoryView", INVENTORY_MANAGE: "permissionInventoryManage",
     STOCK_RECEIVE: "permissionStockReceive", CATALOG_REQUEST: "permissionCatalog", REPORTS_VIEW: "permissionReports",
     SETTINGS_MANAGE: "permissionSettings", SYNC_MANAGE: "permissionSync", USERS_MANAGE: "permissionUsers",
     CUSTOM_ORDERS_VIEW: "permissionCustomOrdersView", CUSTOM_ORDERS_MANAGE: "permissionCustomOrdersManage",

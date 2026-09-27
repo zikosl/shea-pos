@@ -284,6 +284,29 @@ export class SyncService {
             session.accessToken,
           );
           this.database.markSaleSynced(row.aggregate_id, data.createSale.id);
+        } else if (row.operation === "REFUND_SALE") {
+          const details = this.database.getSaleWithItems(payload.saleLocalId) as any;
+          const sale = details.sale as any;
+          if (!sale?.server_id) throw new Error("Sale must synchronize before its refund");
+          const data = await graphqlRequest<{ refundSale: { id: string } }>(
+            session.endpoint,
+            `mutation RefundPosSale($data: RefundSaleInput!) { refundSale(data: $data) { id } }`,
+            {
+              data: {
+                refundId: payload.refundId,
+                saleId: sale.server_id,
+                deviceId: device.id,
+                reason: payload.reason,
+                lines: payload.lines.map((line: any) => {
+                  const item = details.items.find((candidate: any) => candidate.id === line.saleItemId);
+                  if (!item?.product_server_id) throw new Error("Refund product must synchronize first");
+                  return { productId: item.product_server_id, quantity: line.quantity };
+                }),
+              },
+            },
+            session.accessToken,
+          );
+          this.database.markRefundSynced(row.aggregate_id, data.refundSale.id);
         } else if (row.operation === "UPDATE_STOCK") {
           await graphqlRequest(
             session.endpoint,

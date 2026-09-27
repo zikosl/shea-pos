@@ -4,6 +4,7 @@ import type { PosDatabase } from "./database";
 export const permissions = [
   "POS_SELL",
   "REGISTER_MANAGE",
+  "SALES_REFUND",
   "ORDERS_VIEW",
   "INVOICES_VIEW",
   "INVENTORY_VIEW",

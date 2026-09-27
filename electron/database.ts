@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import type {
   ActivateProductInput,
@@ -10,7 +10,9 @@ import type {
   CreateStockEntryInput,
   CreateCustomOrderInput,
   InvoiceDetailsCorrectionInput,
+  HeldCartInput,
   ProposalInput,
+  RefundSaleInput,
 } from "./contracts";
 import { calculateTotals, prepareLine } from "./domain/sale";
 
@@ -37,10 +39,12 @@ type BootstrapPayload = {
 
 export class PosDatabase {
   readonly db: Database.Database;
+  private readonly userDataPath: string;
   private readonly assetRoot: string;
   private readonly imageDataUrlCache = new Map<string, string>();
 
   constructor(userDataPath: string) {
+    this.userDataPath = userDataPath;
     this.db = new Database(path.join(userDataPath, "shea-pos.sqlite"));
     this.assetRoot = path.join(userDataPath, "assets");
     this.db.pragma("journal_mode = WAL");
@@ -54,6 +58,54 @@ export class PosDatabase {
       if (!this.getSetting("deploymentMode")) this.setSetting("deploymentMode", "solo");
       this.setSetting("deploymentConfigured", "true");
     }
+  }
+
+  static applyStagedRestore(userDataPath: string) {
+    const staged = path.join(userDataPath, ".restore-pending");
+    const database = path.join(staged, "shea-pos.sqlite");
+    if (!existsSync(database)) return false;
+    const current = path.join(userDataPath, "shea-pos.sqlite");
+    const rollback = path.join(userDataPath, `shea-pos.before-restore-${Date.now()}.sqlite`);
+    if (existsSync(current)) renameSync(current, rollback);
+    rmSync(`${current}-wal`, { force: true });
+    rmSync(`${current}-shm`, { force: true });
+    cpSync(database, current);
+    const assets = path.join(staged, "assets");
+    if (existsSync(assets)) {
+      rmSync(path.join(userDataPath, "assets"), { recursive: true, force: true });
+      cpSync(assets, path.join(userDataPath, "assets"), { recursive: true, force: true });
+    }
+    rmSync(staged, { recursive: true, force: true });
+    return true;
+  }
+
+  async createBackup(destinationRoot: string) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const target = path.join(destinationRoot, `Shea-POS-Backup-${stamp}`);
+    mkdirSync(target, { recursive: false });
+    await this.db.backup(path.join(target, "shea-pos.sqlite"));
+    if (existsSync(this.assetRoot)) cpSync(this.assetRoot, path.join(target, "assets"), { recursive: true });
+    return target;
+  }
+
+  stageRestore(source: string) {
+    const sourceDatabase = path.join(source, "shea-pos.sqlite");
+    if (!existsSync(sourceDatabase)) throw new Error("INVALID_BACKUP_FOLDER");
+    const candidate = new Database(sourceDatabase, { readonly: true, fileMustExist: true });
+    try {
+      const result = candidate.pragma("quick_check", { simple: true });
+      if (result !== "ok") throw new Error("BACKUP_INTEGRITY_CHECK_FAILED");
+      const migration = candidate.prepare("SELECT MAX(version) version FROM schema_migrations").get() as any;
+      if (!migration?.version) throw new Error("INVALID_BACKUP_DATABASE");
+    } finally {
+      candidate.close();
+    }
+    const staged = path.join(this.userDataPath, ".restore-pending");
+    rmSync(staged, { recursive: true, force: true });
+    mkdirSync(staged, { recursive: true });
+    cpSync(sourceDatabase, path.join(staged, "shea-pos.sqlite"));
+    const assets = path.join(source, "assets");
+    if (existsSync(assets)) cpSync(assets, path.join(staged, "assets"), { recursive: true });
   }
 
   private migrate() {
@@ -345,6 +397,35 @@ export class PosDatabase {
         `);
         this.db.prepare("INSERT INTO schema_migrations(version) VALUES (14)").run();
       })();
+    const hasRetailSafetyMigration = this.db.prepare("SELECT 1 FROM schema_migrations WHERE version=15").get();
+    if (!hasRetailSafetyMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE sales ADD COLUMN refunded_total REAL NOT NULL DEFAULT 0;
+          ALTER TABLE sales ADD COLUMN refunded_at TEXT;
+          ALTER TABLE sale_items ADD COLUMN returned_quantity REAL NOT NULL DEFAULT 0;
+          CREATE TABLE sale_refunds (
+            id TEXT PRIMARY KEY, server_id TEXT UNIQUE, sale_id TEXT NOT NULL,
+            amount REAL NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'COMPLETED',
+            sync_state TEXT NOT NULL DEFAULT 'PENDING', operator_id TEXT, operator_name TEXT,
+            created_at TEXT NOT NULL, synced_at TEXT,
+            FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE RESTRICT
+          );
+          CREATE TABLE sale_refund_items (
+            id TEXT PRIMARY KEY, refund_id TEXT NOT NULL, sale_item_id TEXT NOT NULL,
+            product_local_id TEXT NOT NULL, quantity REAL NOT NULL, amount REAL NOT NULL,
+            FOREIGN KEY(refund_id) REFERENCES sale_refunds(id) ON DELETE CASCADE,
+            FOREIGN KEY(sale_item_id) REFERENCES sale_items(id) ON DELETE RESTRICT
+          );
+          CREATE INDEX sale_refunds_sale_idx ON sale_refunds(sale_id,created_at DESC);
+          CREATE TABLE held_carts (
+            id TEXT PRIMARY KEY, name TEXT, customer_name TEXT, payload_json TEXT NOT NULL,
+            operator_id TEXT, operator_name TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          CREATE INDEX held_carts_updated_idx ON held_carts(updated_at DESC);
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (15)").run();
+      })();
   }
 
   private productImageUrl(row: any) {
@@ -520,9 +601,12 @@ export class PosDatabase {
     const to = input.to ?? new Date().toISOString();
     const summary = this.db
       .prepare(
-        `SELECT COUNT(*) sale_count,COALESCE(SUM(s.total),0) revenue,COALESCE(SUM(s.cost_total),0) cost,
-      COALESCE(SUM(s.gross_profit),0) gross_profit,COALESCE(SUM(s.partner_fee),0) partner_fee,COALESCE(SUM(s.net_profit),0) net_profit,
-      COALESCE(AVG(s.total),0) average_sale FROM sales s WHERE s.status='COMPLETED' AND s.created_at BETWEEN ? AND ?`,
+        `SELECT COUNT(*) sale_count,COALESCE(SUM(s.total-s.refunded_total),0) revenue,
+      COALESCE(SUM(s.cost_total*(CASE WHEN s.total>0 THEN (s.total-s.refunded_total)/s.total ELSE 0 END)),0) cost,
+      COALESCE(SUM(s.gross_profit*(CASE WHEN s.total>0 THEN (s.total-s.refunded_total)/s.total ELSE 0 END)),0) gross_profit,
+      COALESCE(SUM(s.partner_fee*(CASE WHEN s.total>0 THEN (s.total-s.refunded_total)/s.total ELSE 0 END)),0) partner_fee,
+      COALESCE(SUM(s.net_profit*(CASE WHEN s.total>0 THEN (s.total-s.refunded_total)/s.total ELSE 0 END)),0) net_profit,
+      COALESCE(AVG(s.total-s.refunded_total),0) average_sale FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND s.created_at BETWEEN ? AND ?`,
       )
       .get(from, to);
     const stock = this.db
@@ -532,25 +616,27 @@ export class PosDatabase {
       .get();
     const payments = this.db
       .prepare(
-        `SELECT s.payment_method method,COUNT(*) count,COALESCE(SUM(s.total),0) total
-        FROM sales s WHERE s.status='COMPLETED' AND s.created_at BETWEEN ? AND ?
+        `SELECT s.payment_method method,COUNT(*) count,COALESCE(SUM(s.total-s.refunded_total),0) total
+        FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND s.created_at BETWEEN ? AND ?
         GROUP BY s.payment_method ORDER BY total DESC`,
       )
       .all(from, to);
     const topProducts = this.db
       .prepare(
-        `SELECT si.product_name,si.variant_name,SUM(si.quantity) quantity,
-        COALESCE(SUM(si.total),0) revenue,COALESCE(SUM(si.profit),0) profit
+        `SELECT si.product_name,si.variant_name,SUM(si.quantity-si.returned_quantity) quantity,
+        COALESCE(SUM(si.total*(si.quantity-si.returned_quantity)/si.quantity),0) revenue,
+        COALESCE(SUM(si.profit*(si.quantity-si.returned_quantity)/si.quantity),0) profit
         FROM sale_items si JOIN sales s ON s.id=si.sale_id
-        WHERE s.status='COMPLETED' AND s.created_at BETWEEN ? AND ?
+        WHERE s.status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND s.created_at BETWEEN ? AND ?
         GROUP BY si.product_name,si.variant_name ORDER BY revenue DESC LIMIT 8`,
       )
       .all(from, to);
     const trend = this.db
       .prepare(
         `SELECT date(s.created_at,'localtime') day,COUNT(*) count,
-        COALESCE(SUM(s.total),0) revenue,COALESCE(SUM(s.net_profit),0) net_profit
-        FROM sales s WHERE s.status='COMPLETED' AND s.created_at BETWEEN ? AND ?
+        COALESCE(SUM(s.total-s.refunded_total),0) revenue,
+        COALESCE(SUM(s.net_profit*(CASE WHEN s.total>0 THEN (s.total-s.refunded_total)/s.total ELSE 0 END)),0) net_profit
+        FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND s.created_at BETWEEN ? AND ?
         GROUP BY day ORDER BY day`,
       )
       .all(from, to);
@@ -972,6 +1058,41 @@ export class PosDatabase {
       .prepare("SELECT * FROM sales ORDER BY created_at DESC LIMIT 250")
       .all();
   }
+
+  getSaleDetails(id: string) {
+    const sale = this.db.prepare("SELECT * FROM sales WHERE id=?").get(id);
+    if (!sale) throw new Error("INVOICE_NOT_FOUND");
+    return {
+      sale,
+      items: this.db.prepare("SELECT * FROM sale_items WHERE sale_id=? ORDER BY rowid").all(id),
+      refunds: this.db.prepare("SELECT * FROM sale_refunds WHERE sale_id=? ORDER BY created_at DESC").all(id),
+    };
+  }
+
+  listHeldCarts() {
+    return (this.db.prepare("SELECT * FROM held_carts ORDER BY updated_at DESC").all() as any[])
+      .map((row) => ({ ...row, payload: JSON.parse(row.payload_json) }));
+  }
+
+  holdCart(input: HeldCartInput & { operatorId?: string; operatorName?: string }) {
+    if (!input.lines.length) throw new Error("Add at least one product");
+    const id = input.id ?? randomUUID();
+    const now = new Date().toISOString();
+    const lines = input.lines.map((line) => {
+      const product = this.db.prepare("SELECT local_id,name,variant_name,price,discount,stock,inventory_policy,image FROM products WHERE local_id=? AND active=1").get(line.productLocalId) as any;
+      if (!product) throw new Error("Product is no longer available");
+      return { product, quantity: line.quantity, unitPrice: line.unitPrice };
+    });
+    this.db.prepare(`INSERT INTO held_carts(id,name,customer_name,payload_json,operator_id,operator_name,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,customer_name=excluded.customer_name,
+      payload_json=excluded.payload_json,operator_id=excluded.operator_id,operator_name=excluded.operator_name,updated_at=excluded.updated_at`)
+      .run(id, input.name?.trim() || null, input.customerName?.trim() || null, JSON.stringify({ lines }), input.operatorId ?? null, input.operatorName ?? null, now, now);
+    return this.listHeldCarts().find((cart: any) => cart.id === id);
+  }
+
+  deleteHeldCart(id: string) {
+    this.db.prepare("DELETE FROM held_carts WHERE id=?").run(id);
+  }
   listOrders() {
     return this.db
       .prepare("SELECT * FROM orders ORDER BY updated_at DESC LIMIT 100")
@@ -1081,6 +1202,8 @@ export class PosDatabase {
       customer_name: row.customer_name,
       status: row.status,
       total: row.total,
+      refunded_total: row.refunded_total,
+      refunded_at: row.refunded_at,
       sync_state: row.sync_state,
       operator_name: row.operator_name,
       note: row.note,
@@ -1581,7 +1704,8 @@ export class PosDatabase {
 
   checkout(input: CheckoutInput) {
     if (!input.lines.length) throw new Error("Add at least one product");
-    if (input.paymentMethod === "CASH" && !this.getCashSession())
+    if (input.paymentMethod !== "CASH") throw new Error("CASH_ONLY_CHECKOUT");
+    if (!this.getCashSession())
       throw new Error("Open the register before accepting cash");
     return this.db.transaction(() => {
       const saleId = input.transactionId ?? randomUUID();
@@ -1595,6 +1719,8 @@ export class PosDatabase {
             "SELECT * FROM products WHERE local_id=? AND active=1 AND visible_in_pos=1",
           )
           .get(line.productLocalId) as any;
+        if (product?.price_on_request && line.unitPrice === undefined)
+          throw new Error("PRICE_CONFIRMATION_REQUIRED");
         snapshots.push(prepareLine(product, line));
       }
       const { subtotal, discountTotal, taxTotal, total } = calculateTotals(
@@ -1620,6 +1746,8 @@ export class PosDatabase {
       const partnerFee = percentageFee + fixedFee;
       const netProfit = grossProfit - partnerFee;
       const tendered = input.amountTendered ?? total;
+      if (!Number.isFinite(tendered) || tendered < total)
+        throw new Error("INSUFFICIENT_TENDERED_CASH");
       const changeDue =
         input.paymentMethod === "CASH" ? Math.max(0, tendered - total) : 0;
       this.db
@@ -1732,6 +1860,90 @@ export class PosDatabase {
         items,
       };
     })();
+  }
+
+  refundSale(input: RefundSaleInput) {
+    if (!input.lines.length) throw new Error("REFUND_ITEMS_REQUIRED");
+    if (new Set(input.lines.map((line) => line.saleItemId)).size !== input.lines.length)
+      throw new Error("DUPLICATE_REFUND_ITEM");
+    const reason = input.reason.trim();
+    if (reason.length < 3) throw new Error("REFUND_REASON_REQUIRED");
+    const session = this.getCashSession() as any;
+    if (!session) throw new Error("Open the register before refunding cash");
+    return this.db.transaction(() => {
+      const sale = this.db.prepare("SELECT * FROM sales WHERE id=?").get(input.saleId) as any;
+      if (!sale) throw new Error("INVOICE_NOT_FOUND");
+      if (!["COMPLETED", "PARTIALLY_REFUNDED"].includes(sale.status)) throw new Error("SALE_NOT_REFUNDABLE");
+      const refundId = input.refundId ?? randomUUID();
+      const now = new Date().toISOString();
+      const prepared = input.lines.map((line) => {
+        const item = this.db.prepare("SELECT * FROM sale_items WHERE id=? AND sale_id=?").get(line.saleItemId, sale.id) as any;
+        if (!item) throw new Error("SALE_ITEM_NOT_FOUND");
+        const remaining = Number(item.quantity) - Number(item.returned_quantity ?? 0);
+        if (!Number.isFinite(line.quantity) || line.quantity <= 0 || line.quantity > remaining)
+          throw new Error("INVALID_REFUND_QUANTITY");
+        const amount = Number(item.total) * (line.quantity / Number(item.quantity));
+        return { item, quantity: line.quantity, amount };
+      });
+      const amount = prepared.reduce((sum, row) => sum + row.amount, 0);
+      if (Number(session.expected_cash) < amount) throw new Error("INSUFFICIENT_REGISTER_CASH");
+      this.db.prepare(`INSERT INTO sale_refunds(id,sale_id,amount,reason,sync_state,operator_id,operator_name,created_at)
+        VALUES (?,?,?,?,?,?,?,?)`).run(refundId, sale.id, amount, reason, input.gatewayCommitted ? "SYNCED" : "PENDING", input.operatorId ?? null, input.operatorName ?? null, now);
+      for (const row of prepared) {
+        this.db.prepare("UPDATE sale_items SET returned_quantity=returned_quantity+? WHERE id=?").run(row.quantity, row.item.id);
+        this.db.prepare("INSERT INTO sale_refund_items(id,refund_id,sale_item_id,product_local_id,quantity,amount) VALUES (?,?,?,?,?,?)")
+          .run(randomUUID(), refundId, row.item.id, row.item.product_local_id, row.quantity, row.amount);
+        const product = this.db.prepare("SELECT stock,inventory_policy FROM products WHERE local_id=?").get(row.item.product_local_id) as any;
+        if (product?.inventory_policy === "TRACKED") {
+          const before = Number(product.stock);
+          const after = before + row.quantity;
+          this.db.prepare("UPDATE products SET stock=?,updated_at=CURRENT_TIMESTAMP WHERE local_id=?").run(after, row.item.product_local_id);
+          this.db.prepare(`INSERT INTO stock_movements(id,product_local_id,sale_id,type,quantity_delta,stock_before,stock_after,reason,sync_state,created_at)
+            VALUES (?,?,?,'RETURN',?,?,?,?,?,?)`).run(randomUUID(), row.item.product_local_id, sale.id, row.quantity, before, after, `Refund ${sale.sale_number}`, input.gatewayCommitted ? "SYNCED" : "PENDING", now);
+        }
+      }
+      const refundedTotal = Number(sale.refunded_total ?? 0) + amount;
+      const fullyRefunded = refundedTotal >= Number(sale.total) - 0.005;
+      this.db.prepare("UPDATE sales SET status=?,refunded_total=?,refunded_at=? WHERE id=?")
+        .run(fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED", refundedTotal, now, sale.id);
+      this.db.prepare("UPDATE cash_sessions SET expected_cash=expected_cash-?,sync_state=CASE WHEN sync_state='SYNCED' THEN 'PENDING' ELSE sync_state END WHERE local_id=?")
+        .run(amount, session.local_id);
+      if (!input.gatewayCommitted)
+        this.enqueue("REFUND_SALE", "SaleRefund", refundId, {
+          refundId,
+          saleLocalId: sale.id,
+          saleServerId: sale.server_id,
+          reason,
+          lines: prepared.map((row) => ({ saleItemId: row.item.id, productId: row.item.product_server_id, quantity: row.quantity })),
+        }, sale.server_id ? "PENDING" : "BLOCKED");
+      return this.getSaleDetails(sale.id);
+    })();
+  }
+
+  validateRefund(input: RefundSaleInput) {
+    if (!input.lines.length) throw new Error("REFUND_ITEMS_REQUIRED");
+    if (new Set(input.lines.map((line) => line.saleItemId)).size !== input.lines.length)
+      throw new Error("DUPLICATE_REFUND_ITEM");
+    if (input.reason.trim().length < 3) throw new Error("REFUND_REASON_REQUIRED");
+    const session = this.getCashSession() as any;
+    if (!session) throw new Error("Open the register before refunding cash");
+    const sale = this.db.prepare("SELECT * FROM sales WHERE id=?").get(input.saleId) as any;
+    if (!sale) throw new Error("INVOICE_NOT_FOUND");
+    if (!["COMPLETED", "PARTIALLY_REFUNDED"].includes(sale.status)) throw new Error("SALE_NOT_REFUNDABLE");
+    const amount = input.lines.reduce((sum, line) => {
+      const item = this.db.prepare("SELECT * FROM sale_items WHERE id=? AND sale_id=?").get(line.saleItemId, sale.id) as any;
+      if (!item) throw new Error("SALE_ITEM_NOT_FOUND");
+      const remaining = Number(item.quantity) - Number(item.returned_quantity ?? 0);
+      if (!Number.isFinite(line.quantity) || line.quantity <= 0 || line.quantity > remaining)
+        throw new Error("INVALID_REFUND_QUANTITY");
+      return sum + Number(item.total) * (line.quantity / Number(item.quantity));
+    }, 0);
+    if (Number(session.expected_cash) < amount) throw new Error("INSUFFICIENT_REGISTER_CASH");
+    return { sale, amount };
+  }
+
+  markRefundSynced(localId: string, serverId: string) {
+    this.db.prepare("UPDATE sale_refunds SET server_id=?,sync_state='SYNCED',synced_at=CURRENT_TIMESTAMP WHERE id=?").run(serverId, localId);
   }
 
   gatewaySaleLines(lines: CheckoutInput["lines"]) {
@@ -2015,11 +2227,23 @@ export class PosDatabase {
     }
   }
   markSaleSynced(localId: string, serverId: string) {
-    this.db
-      .prepare(
-        "UPDATE sales SET server_id=?,sync_state='SYNCED',synced_at=CURRENT_TIMESTAMP WHERE id=?",
-      )
-      .run(serverId, localId);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE sales SET server_id=?,sync_state='SYNCED',synced_at=CURRENT_TIMESTAMP WHERE id=?",
+        )
+        .run(serverId, localId);
+      const rows = this.db.prepare("SELECT id,payload_json FROM outbox WHERE operation='REFUND_SALE' AND state='BLOCKED'").all() as Array<{ id: string; payload_json: string }>;
+      for (const row of rows) {
+        try {
+          const payload = JSON.parse(row.payload_json);
+          if (payload.saleLocalId === localId)
+            this.db.prepare("UPDATE outbox SET state='PENDING',next_attempt_at=NULL,last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(row.id);
+        } catch {
+          // Keep malformed queue records blocked for manual inspection.
+        }
+      }
+    })();
   }
   markProposalSynced(localId: string, serverId: string, status: string) {
     this.db

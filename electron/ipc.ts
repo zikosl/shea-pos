@@ -65,7 +65,7 @@ const checkoutSchema = z.object({
   note: z.string().trim().max(500).optional(),
   discountTotal: z.number().min(0).optional(),
   taxTotal: z.number().min(0).optional(),
-  paymentMethod: z.enum(["CASH", "CARD", "OTHER"]),
+  paymentMethod: z.literal("CASH"),
   amountTendered: z.number().min(0).optional(),
   lines: z
     .array(
@@ -192,6 +192,21 @@ const invoiceCorrectionSchema = z.object({
   customerName: z.string().trim().max(120).optional(),
   note: z.string().trim().max(1000).optional(),
   reason: z.string().trim().min(3).max(500),
+});
+const refundSaleSchema = z.object({
+  saleId: z.string().uuid(),
+  reason: z.string().trim().min(3).max(500),
+  lines: z.array(z.object({ saleItemId: z.string().uuid(), quantity: z.number().positive() })).min(1).max(250),
+});
+const heldCartSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().max(120).optional(),
+  customerName: z.string().trim().max(120).optional(),
+  lines: z.array(z.object({
+    productLocalId: z.string().min(1),
+    quantity: z.number().int().positive(),
+    unitPrice: z.number().min(0).optional(),
+  })).min(1).max(500),
 });
 const printPreviewSchema = z
   .object({
@@ -551,6 +566,32 @@ export function registerIpc(
     access.audit("INVOICE_DETAILS_CORRECTED", "Sale", (result as any).id, { revision: (result as any).revision });
     return result;
   }, { permission: "REGISTER_MANAGE" });
+  handle("pos:get-sale-details", (raw) => database.getSaleDetails(z.string().uuid().parse(raw)), { permission: "INVOICES_VIEW" });
+  handle("pos:refund-sale", (raw) => {
+    sync.assertCanTransact();
+    const user = access.require("SALES_REFUND");
+    const input = refundSaleSchema.parse(raw);
+    const refundId = randomUUID();
+    database.validateRefund(input);
+    const complete = () => {
+      const result = database.refundSale({ ...input, refundId, operatorId: user.id, operatorName: user.name, gatewayCommitted: gateway.enabled() });
+      access.audit("SALE_REFUNDED", "Sale", input.saleId, { reason: input.reason, refundId });
+      return result;
+    };
+    if (!gateway.enabled()) return complete();
+    return gateway.refundSale({ ...input, refundId, cashierId: user.id, cashierName: user.name })
+      .then(async () => {
+        const result = complete();
+        await gateway.refreshProducts();
+        return result;
+      });
+  }, { permission: "SALES_REFUND" });
+  handle("pos:list-held-carts", () => database.listHeldCarts(), { permission: "POS_SELL" });
+  handle("pos:hold-cart", (raw) => {
+    const user = access.require("POS_SELL");
+    return database.holdCart({ ...heldCartSchema.parse(raw), operatorId: user.id, operatorName: user.name });
+  }, { permission: "POS_SELL", audit: true });
+  handle("pos:delete-held-cart", (raw) => database.deleteHeldCart(z.string().uuid().parse(raw)), { permission: "POS_SELL", audit: true });
   handle("pos:list-stock-entries", () => database.listStockEntries(), { permission: "STOCK_RECEIVE" });
   handle("pos:create-stock-entry", (raw) => {
     const user = access.require("STOCK_RECEIVE");
@@ -607,6 +648,18 @@ export function registerIpc(
     sync.assertCanTransact();
     return database.closeCashSession(cashCloseSchema.parse(raw));
   }, { permission: "REGISTER_MANAGE", audit: true });
+  handle("pos:create-backup", async () => {
+    const selection = await dialog.showOpenDialog(mainWindow, { title: "Choose backup location", properties: ["openDirectory", "createDirectory"] });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    return { path: await database.createBackup(selection.filePaths[0]) };
+  }, { permission: "SETTINGS_MANAGE", audit: true });
+  handle("pos:restore-backup", async () => {
+    const selection = await dialog.showOpenDialog(mainWindow, { title: "Choose a Shea POS backup folder", properties: ["openDirectory"] });
+    if (selection.canceled || !selection.filePaths[0]) return { restored: false };
+    database.stageRestore(selection.filePaths[0]);
+    setTimeout(() => { app.relaunch(); app.exit(0); }, 250);
+    return { restored: true };
+  }, { permission: "SETTINGS_MANAGE", audit: true });
   handle("pos:adjust-stock", async (raw) => {
     const input = stockSchema.parse(raw);
     if (gateway.enabled()) await gateway.adjustStock(input);

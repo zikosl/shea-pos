@@ -1,0 +1,66 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "shea-pos-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+    steps:
+      - name: Checkout POS
+        uses: actions/checkout@v4
+        with:
+          path: shea-pos
+      - name: Checkout shared protocol
+        uses: actions/checkout@v4
+        with:
+          repository: zikosl/pos-protocol
+          path: packages/pos-protocol
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: shea-pos/package-lock.json
+      - name: Build shared protocol
+        working-directory: packages/pos-protocol
+        run: npm ci && npm run typecheck && npm run test:contracts
+      - name: Install POS dependencies
+        working-directory: shea-pos
+        run: npm ci
+      - name: Verify release configuration
+        working-directory: shea-pos
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK) -or [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) { throw "Windows signing secrets are required." }
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            if ($env:GITHUB_REF_NAME -ne "shea-pos-v$version") { throw "Tag must match package version shea-pos-v$version." }
+          }
+      - name: Verify and package
+        working-directory: shea-pos
+        run: npm run typecheck && npm run test:integration && npm run dist:win
+      - name: Create checksums
+        working-directory: shea-pos
+        shell: pwsh
+        run: |
+          Get-ChildItem release -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' } | ForEach-Object {
+            "$(Get-FileHash $_.FullName -Algorithm SHA256 | Select-Object -ExpandProperty Hash)  $($_.Name)"
+          } | Set-Content release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shea-pos-windows
+          path: |
+            shea-pos/release/*.exe
+            shea-pos/release/latest.yml
+            shea-pos/release/*.blockmap
+            shea-pos/release/SHA256SUMS.txt
+          if-no-files-found: error

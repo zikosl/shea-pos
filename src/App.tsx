@@ -574,7 +574,7 @@ export default function App() {
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen />}
             {page === "sales" && (
-              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} />
+              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} />
             )}
             {page === "reports" && <ReportsScreen onNotice={setNotice} />}
             {page === "requests" && (

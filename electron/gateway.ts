@@ -3,6 +3,18 @@ import { randomUUID } from "node:crypto";
 import type { PosDatabase } from "./database";
 import type { CheckoutInput } from "./contracts";
 import { POS_PROTOCOL_VERSION, saleRequestSchema, stockAdjustmentSchema, stockBatchSchema } from "@zikosl/shea-pos-protocol";
+import { z } from "zod";
+
+const refundRequestSchema = z.object({
+  protocolVersion: z.literal(POS_PROTOCOL_VERSION),
+  id: z.uuid(),
+  saleId: z.uuid(),
+  cashierId: z.string().max(160).nullish(),
+  cashierName: z.string().max(160).nullish(),
+  reason: z.string().trim().min(3).max(500),
+  createdAt: z.iso.datetime(),
+  items: z.array(z.object({ productId: z.number().int().positive(), quantity: z.number().positive() })).min(1).max(500),
+});
 
 const TOKEN_KEY = "secureGatewayToken";
 
@@ -123,6 +135,29 @@ export class GatewayService {
         paymentMethod: input.paymentMethod,
         createdAt: new Date().toISOString(),
         items: lines,
+      })),
+    });
+  }
+
+  async refundSale(input: { refundId: string; saleId: string; reason: string; cashierId?: string; cashierName?: string; lines: Array<{ saleItemId: string; quantity: number }> }) {
+    const details = this.database.getSaleDetails(input.saleId) as any;
+    if (!details?.sale) throw new Error("INVOICE_NOT_FOUND");
+    const items = input.lines.map((line) => {
+      const item = details.items.find((candidate: any) => candidate.id === line.saleItemId);
+      if (!item?.product_server_id) throw new Error("Synchronize products before refunding in multi-POS mode");
+      return { productId: Number(item.product_server_id), quantity: line.quantity };
+    });
+    return this.request("/v1/refunds", {
+      method: "POST",
+      body: JSON.stringify(refundRequestSchema.parse({
+        protocolVersion: POS_PROTOCOL_VERSION,
+        id: input.refundId,
+        saleId: input.saleId,
+        cashierId: input.cashierId,
+        cashierName: input.cashierName,
+        reason: input.reason,
+        createdAt: new Date().toISOString(),
+        items,
       })),
     });
   }

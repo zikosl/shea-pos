@@ -1,8 +1,9 @@
-export type PaymentMethod = "CASH" | "CARD" | "OTHER";
+export type PaymentMethod = "CASH";
 export type LocalRole = "OWNER" | "MANAGER" | "CASHIER" | "STOCK_CLERK" | "CUSTOM";
 export type { UpdateStatus } from "./updater";
 export type Permission =
   | "POS_SELL" | "REGISTER_MANAGE" | "ORDERS_VIEW" | "INVOICES_VIEW"
+  | "SALES_REFUND"
   | "INVENTORY_VIEW" | "INVENTORY_MANAGE" | "STOCK_RECEIVE"
   | "CATALOG_REQUEST" | "REPORTS_VIEW" | "SETTINGS_MANAGE"
   | "SYNC_MANAGE" | "USERS_MANAGE" | "CUSTOM_ORDERS_VIEW" | "CUSTOM_ORDERS_MANAGE";
@@ -29,6 +30,23 @@ export type CheckoutInput = {
   transactionId?: string;
   saleNumber?: string;
   gatewayCommitted?: boolean;
+};
+
+export type RefundSaleInput = {
+  refundId?: string;
+  saleId: string;
+  reason: string;
+  lines: Array<{ saleItemId: string; quantity: number }>;
+  operatorId?: string;
+  operatorName?: string;
+  gatewayCommitted?: boolean;
+};
+
+export type HeldCartInput = {
+  id?: string;
+  name?: string;
+  customerName?: string;
+  lines: Array<{ productLocalId: string; quantity: number; unitPrice?: number }>;
 };
 
 export type ProposalInput = {
@@ -219,6 +237,11 @@ export type PosApi = {
   listInvoices(): Promise<unknown[]>;
   lookupInvoice(input: { reference: string }): Promise<unknown>;
   correctInvoiceDetails(input: Omit<InvoiceDetailsCorrectionInput, "operatorId" | "operatorName">): Promise<unknown>;
+  getSaleDetails(id: string): Promise<unknown>;
+  refundSale(input: Omit<RefundSaleInput, "operatorId" | "operatorName" | "gatewayCommitted">): Promise<unknown>;
+  listHeldCarts(): Promise<unknown[]>;
+  holdCart(input: HeldCartInput): Promise<unknown>;
+  deleteHeldCart(id: string): Promise<void>;
   listStockEntries(): Promise<unknown[]>;
   createStockEntry(input: CreateStockEntryInput): Promise<unknown>;
   cancelStockEntry(id: string): Promise<unknown>;
@@ -237,6 +260,8 @@ export type PosApi = {
     countedCash: number;
     note?: string;
   }): Promise<unknown>;
+  createBackup(): Promise<{ path: string } | null>;
+  restoreBackup(): Promise<{ restored: boolean }>;
   adjustStock(input: {
     productLocalId: string;
     mode: "RECEIVE" | "REMOVE" | "SET";

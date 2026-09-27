@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Check,
+  DatabaseBackup,
   FileText,
   LoaderCircle,
   Printer,
@@ -312,6 +313,21 @@ export function SettingsScreen({
     }
   }
 
+  async function createBackup() {
+    try {
+      const result = await window.pos.createBackup();
+      if (result) onNotice(`${t("backupCreated")}: ${result.path}`);
+    } catch (value) { onNotice(localizeError(language, value)); }
+  }
+
+  async function restoreBackup() {
+    if (!window.confirm(t("restoreBackupConfirm"))) return;
+    try {
+      const result = await window.pos.restoreBackup();
+      if (result.restored) onNotice(t("restoringBackup"));
+    } catch (value) { onNotice(localizeError(language, value)); }
+  }
+
   async function provisionGateway() {
     if (!selectedStoreId) return;
     setGatewayBusy(true);
@@ -513,6 +529,14 @@ export function SettingsScreen({
           <div className="gateway-actions">
             <button type="button" className="button ghost" disabled={sessionsLoading} onClick={loadAccountSessions}><RefreshCw />{t("refresh")}</button>
             {accountSessions.some((session) => session.id !== currentTokenId) ? <button type="button" className="button secondary danger" onClick={() => void revokeOtherSessions()}><LogOut />{t("signOutOtherDevices")}</button> : null}
+          </div>
+        </section>
+
+        <section className="panel settings-section">
+          <div className="section-title"><div className="section-icon"><DatabaseBackup /></div><div><h3>{t("backupAndRecovery")}</h3><p>{t("backupAndRecoveryHelp")}</p></div></div>
+          <div className="gateway-actions">
+            <button type="button" className="button secondary" onClick={() => void createBackup()}><DatabaseBackup />{t("createBackup")}</button>
+            <button type="button" className="button ghost danger" onClick={() => void restoreBackup()}>{t("restoreBackup")}</button>
           </div>
         </section>
       </div>

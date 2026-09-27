@@ -55,7 +55,7 @@ export type Product = {
   price_on_request: number;
 };
 
-export type CartLine = { product: Product; quantity: number };
+export type CartLine = { product: Product; quantity: number; unitPrice?: number };
 
 export type Catalog = {
   niches: Array<{ id: number; name: string; name_ar: string }>;
