@@ -313,6 +313,15 @@ async function main() {
         previewPriceLabel(database, provisional.local_id),
         /Offline serum/,
       );
+      const compactLabel = previewPriceLabel(database, provisional.local_id, {
+        labelWidth: "40",
+        labelHeight: "20",
+        language: "ar",
+      });
+      assert.match(compactLabel, /<html lang="ar" dir="rtl">/);
+      assert.match(compactLabel, /@page\{size:40mm 20mm;margin:0\}/);
+      assert.match(compactLabel, /class="price" dir="ltr"/);
+      assert.doesNotMatch(compactLabel, /border:\.2mm solid/);
       database.db.prepare(
         "INSERT INTO orders(server_id,status,total,customer_name,payload_json) VALUES (42,'DELIVERED',700,'Delivery customer',?)",
       ).run(JSON.stringify({

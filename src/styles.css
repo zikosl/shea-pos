@@ -4316,6 +4316,13 @@ textarea:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
+.settings-overview-grid.settings-single-panel { grid-template-columns: minmax(0, 1fr); }
+.settings-main-tabs { display: flex; gap: 5px; width: fit-content; max-width: 100%; padding: 4px; border-radius: 12px; background: var(--surface-2); overflow-x: auto; }
+.settings-main-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.settings-main-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 2px 9px rgba(18, 28, 50, .07); }
+.settings-main-tabs button svg { width: 15px; height: 15px; }
+.settings-main-tabs button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.settings-printer-warning { margin: 0; color: var(--danger); font-size: 12px; line-height: 1.4; }
 
 .settings-section {
   display: flex;

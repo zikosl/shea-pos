@@ -1,6 +1,6 @@
 {
   "name": "shea-pos",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "private": true,
   "description": "Offline-first Shea point of sale",
   "main": "dist-electron/main.js",

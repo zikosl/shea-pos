@@ -20,6 +20,7 @@ import { LoadingState } from "../../components/AsyncState";
 import { PageHeader } from "../../components/PageHeader";
 
 type PrintTab = "receipt" | "label";
+type SettingsTab = "general" | "printing" | "connection" | "security";
 
 type StoreNetwork = {
   id: string;
@@ -79,6 +80,7 @@ export function SettingsScreen({
   const [printers, setPrinters] = useState<any[]>([]);
   const [draft, setDraft] = useState(() => settingsDraft(values));
   const [tab, setTab] = useState<PrintTab>("receipt");
+  const [section, setSection] = useState<SettingsTab>("general");
   const [previewHtml, setPreviewHtml] = useState("");
   const [previewRevision, setPreviewRevision] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(true);
@@ -106,7 +108,7 @@ export function SettingsScreen({
       .finally(() => setLoadingPrinters(false));
   }
 
-  useEffect(loadPrinters, []);
+  useEffect(() => { if (section === "printing") loadPrinters(); }, [section]);
 
   function loadGatewayStatus() {
     void window.pos.getGatewayStatus().then(setGatewayStatus).catch(() => setGatewayStatus(null));
@@ -160,6 +162,7 @@ export function SettingsScreen({
   }, []);
 
   useEffect(() => {
+    if (section !== "printing") return;
     let current = true;
     setPreviewLoading(true);
     const timeout = window.setTimeout(() => {
@@ -182,7 +185,7 @@ export function SettingsScreen({
       current = false;
       window.clearTimeout(timeout);
     };
-  }, [draft, tab]);
+  }, [draft, tab, section]);
 
   function change(key: string, value: string, applyImmediately = false) {
     const next = { ...draft, [key]: value };
@@ -259,6 +262,9 @@ export function SettingsScreen({
   async function testPrint() {
     setPrinting(true);
     try {
+      const selectedPrinter = tab === "receipt" ? draft.printerName : draft.labelPrinterName;
+      if (!printers.length) throw new Error("NO_SYSTEM_PRINTERS");
+      if (selectedPrinter && !printers.some((printer) => printer.name === selectedPrinter)) throw new Error("PRINTER_NOT_FOUND");
       if (tab === "receipt") {
         await window.pos.testPrinter({
           printerName: draft.printerName || undefined,
@@ -270,7 +276,7 @@ export function SettingsScreen({
           settings: draft,
         });
       }
-      onNotice(t("testReceiptSent"));
+      onNotice(t("testPrintSent"));
     } catch (value) {
       onNotice(localizeError(language, value));
     } finally {
@@ -362,8 +368,8 @@ export function SettingsScreen({
     <form className="page-stack settings-form" onSubmit={save}>
       <PageHeader
         eyebrow={t("workspace")}
-        title={t("appearancePrinting")}
-        description={t("appearanceHelp")}
+        title={t("settings")}
+        description={t("settingsTabsHelp")}
         actions={
           <button className="button primary" disabled={saving}>
             {saving ? <LoaderCircle className="spin" /> : <Check />}
@@ -372,7 +378,17 @@ export function SettingsScreen({
         }
       />
 
-      <div className="settings-overview-grid">
+      <nav className="settings-main-tabs" aria-label={t("settings")}>
+        {([
+          ["general", SlidersHorizontal, t("settingsGeneral")],
+          ["printing", Printer, t("settingsPrinting")],
+          ["connection", Network, t("settingsConnection")],
+          ["security", ShieldCheck, t("settingsSecurity")],
+        ] as const).map(([value, Icon, label]) => <button key={value} type="button" aria-pressed={section === value} className={section === value ? "active" : ""} onClick={() => setSection(value)}><Icon />{label}</button>)}
+      </nav>
+
+      <div className={`settings-overview-grid ${section === "printing" || section === "connection" ? "settings-single-panel" : ""}`}>
+        {section === "general" ? <>
         <section className="panel settings-section">
           <div className="section-title">
             <div className="section-icon"><SlidersHorizontal /></div>
@@ -421,7 +437,9 @@ export function SettingsScreen({
             </div>
           </label>
         </section>
+        </> : null}
 
+        {section === "connection" ? <>
         <section className="panel settings-section gateway-settings">
           <div className="section-title">
             <div className="section-icon"><Network /></div>
@@ -492,19 +510,22 @@ export function SettingsScreen({
             </div>
           ) : null}
         </section>
+        </> : null}
 
+        {section === "printing" ? <>
         <section className="panel settings-section">
           <div className="section-title">
             <div className="section-icon"><Printer /></div>
-            <div><h3>{t("windowsPrinters")}</h3><p>{t("nativePrinterHelp")}</p></div>
+            <div><h3>{t("systemPrinters")}</h3><p>{t("nativePrinterHelp")}</p></div>
           </div>
-          <PrinterSelect label={t("receiptPrinter")} value={draft.printerName || ""} onChange={(value) => change("printerName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} defaultSuffix={t("defaultSuffix")} />
-          <PrinterSelect label={t("labelPrinter")} value={draft.labelPrinterName || ""} onChange={(value) => change("labelPrinterName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} defaultSuffix={t("defaultSuffix")} />
           {loadingPrinters ? <LoadingState label={t("loading")} compact /> : null}
+          {!loadingPrinters && !printers.length ? <p className="settings-printer-warning" role="status">{t("noSystemPrinters")}</p> : null}
           <button type="button" className="button secondary" disabled={loadingPrinters} onClick={loadPrinters}><RefreshCw />{t("refreshPrinters")}</button>
           <div className="info"><SlidersHorizontal /><p><strong>{t("windowsDriverTitle")}</strong><br />{t("windowsDriverHelp")}</p></div>
         </section>
+        </> : null}
 
+        {section === "security" ? <>
         <section className="panel settings-section account-sessions-section">
           <div className="section-title">
             <div className="section-icon"><MonitorSmartphone /></div>
@@ -539,8 +560,10 @@ export function SettingsScreen({
             <button type="button" className="button ghost danger" onClick={() => void restoreBackup()}>{t("restoreBackup")}</button>
           </div>
         </section>
+        </> : null}
       </div>
 
+      {section === "printing" ?
       <section className="panel print-studio">
         <div className="print-studio-heading">
           <div>
@@ -555,6 +578,7 @@ export function SettingsScreen({
         </div>
         <div className="print-studio-grid">
           <div className="print-controls">
+            {tab === "receipt" ? <PrinterSelect label={t("receiptPrinter")} value={draft.printerName || ""} onChange={(value) => change("printerName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} /> : <PrinterSelect label={t("labelPrinter")} value={draft.labelPrinterName || ""} onChange={(value) => change("labelPrinterName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} />}
             {tab === "receipt" ? (
               <>
                 <div className="receipt-control-group">
@@ -608,17 +632,18 @@ export function SettingsScreen({
           <div className="print-preview-panel">
             <div className="print-preview-toolbar"><span><i />{t("livePreview")}</span><small>{tab === "receipt" ? `${draft.receiptPaperWidth} mm` : `${draft.labelWidth} × ${draft.labelHeight} mm`}</small></div>
             <div className={`print-preview-canvas ${tab}`}>
-              {previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe key={`${tab}-${previewRevision}`} title={t("livePreview")} srcDoc={previewHtml} sandbox="" />}
+              {previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe key={`${tab}-${previewRevision}`} title={t("livePreview")} srcDoc={previewHtml} sandbox="" style={{ width: tab === "receipt" ? `${draft.receiptPaperWidth}mm` : `${draft.labelWidth}mm`, height: tab === "receipt" ? "520px" : `${draft.labelHeight}mm` }} />}
             </div>
           </div>
         </div>
-      </section>
+      </section> : null}
     </form>
   );
 }
 
-function PrinterSelect({ label, value, onChange, printers, loading, defaultLabel, defaultSuffix }: { label: string; value: string; onChange: (value: string) => void; printers: any[]; loading: boolean; defaultLabel: string; defaultSuffix: string }) {
-  return <label>{label}<select value={value} disabled={loading} onChange={(event) => onChange(event.target.value)}><option value="">{defaultLabel}</option>{printers.map((printer) => <option key={printer.name} value={printer.name}>{printer.displayName || printer.name}{printer.isDefault ? ` (${defaultSuffix})` : ""}</option>)}</select></label>;
+function PrinterSelect({ label, value, onChange, printers, loading, defaultLabel, missingLabel }: { label: string; value: string; onChange: (value: string) => void; printers: any[]; loading: boolean; defaultLabel: string; missingLabel: string }) {
+  const missing = Boolean(value && !loading && !printers.some((printer) => printer.name === value));
+  return <label>{label}<select value={value} disabled={loading} onChange={(event) => onChange(event.target.value)}><option value="">{defaultLabel}</option>{missing ? <option value={value}>{value} ({missingLabel})</option> : null}{printers.map((printer) => <option key={printer.name} value={printer.name}>{printer.displayName || printer.name}</option>)}</select>{missing ? <small className="settings-printer-warning" role="status">{missingLabel}</small> : null}</label>;
 }
 
 function Toggle({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {

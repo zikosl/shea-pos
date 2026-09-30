@@ -147,7 +147,7 @@ export function previewInvoice(database: PosDatabase, source: "POS" | "DELIVERY"
 }
 
 export async function printInvoice(database: PosDatabase, source: "POS" | "DELIVERY", id: string, printerName?: string) {
-  await printHtml(previewInvoice(database, source, id), printerName);
+  await printHtml(previewInvoice(database, source, id), printerName || database.getSetting("printerName") || undefined);
 }
 
 export function previewStockEntry(database: PosDatabase, id: string) {
@@ -167,7 +167,7 @@ export function previewStockEntry(database: PosDatabase, id: string) {
 }
 
 export async function printStockEntry(database: PosDatabase, id: string, printerName?: string) {
-  await printHtml(previewStockEntry(database, id), printerName);
+  await printHtml(previewStockEntry(database, id), printerName || database.getSetting("printerName") || undefined);
 }
 
 export function priceLabelHtml(products: Array<{ product: any; copies: number }>, settings: PrintSettings) {
@@ -177,9 +177,10 @@ export function priceLabelHtml(products: Array<{ product: any; copies: number }>
   const labels = products.flatMap(({ product, copies }) => Array.from({ length: Math.min(100, Math.max(1, copies)) }, () => {
     const code = product.barcode || product.sku;
     const barcode = enabled(settings, "labelShowBarcode", true) ? barcodeSvg(code) : "";
-    return `<article class="label">${enabled(settings, "labelShowLogo", false) && settings.storeLogo ? `<img class="logo" src="${escape(settings.storeLogo)}" alt="">` : ""}<div class="copy"><strong>${escape(language === "ar" && product.name_ar ? product.name_ar : product.name)}</strong>${enabled(settings, "labelShowVariant", true) && product.variant_name ? `<small>${escape(product.variant_name)}</small>` : ""}</div><div class="price">${money(product.price)}</div>${barcode ? `<div class="barcode">${barcode}</div>` : enabled(settings, "labelShowSku", true) && code ? `<div class="code">${escape(code)}</div>` : ""}</article>`;
+    const amount = Number(product.price ?? 0).toLocaleString(language === "ar" ? "ar-DZ" : "en-DZ", { maximumFractionDigits: 2 });
+    return `<article class="label">${enabled(settings, "labelShowLogo", false) && settings.storeLogo ? `<img class="logo" src="${escape(settings.storeLogo)}" alt="">` : ""}<div class="copy"><strong>${escape(language === "ar" && product.name_ar ? product.name_ar : product.name)}</strong>${enabled(settings, "labelShowVariant", true) && product.variant_name ? `<small>${escape(product.variant_name)}</small>` : ""}</div><div class="price" dir="ltr">${escape(amount)} <small>DZD</small></div>${barcode ? `<div class="barcode">${barcode}</div>` : enabled(settings, "labelShowSku", true) && code ? `<div class="code" dir="ltr">${escape(code)}</div>` : ""}</article>`;
   }));
-  return documentHtml(labels.join(""), language, `@page{size:${width}mm ${height}mm;margin:0}.label{position:relative;width:${width}mm;height:${height}mm;padding:2.2mm;overflow:hidden;display:grid;grid-template-columns:1fr auto;grid-template-rows:auto 1fr auto;column-gap:2mm;page-break-after:always;border:.2mm solid #ddd}.label:last-child{page-break-after:auto}.logo{position:absolute;top:2mm;inset-inline-end:2mm;width:8mm;height:6mm;object-fit:contain}.copy{display:flex;min-width:0;flex-direction:column;grid-column:1/-1;padding-inline-end:${enabled(settings, "labelShowLogo", false) ? "9mm" : "0"}}.copy strong{overflow:hidden;font-size:10px;line-height:1.1;text-overflow:ellipsis;white-space:nowrap}.copy small,.code{font-size:7px;color:#333}.price{align-self:center;font-size:${height >= 35 ? "22px" : "18px"};font-weight:800;white-space:nowrap}.barcode{align-self:end;justify-self:end;width:${Math.min(30, width * 0.55)}mm;direction:ltr}.barcode svg{display:block;width:100%;height:auto;max-height:${Math.max(8, height * 0.36)}mm}.code{grid-column:1/-1;text-align:center;direction:ltr}`);
+  return documentHtml(labels.join(""), language, `@page{size:${width}mm ${height}mm;margin:0}.label{position:relative;width:${width}mm;height:${height}mm;padding:2mm;overflow:hidden;display:flex;flex-direction:column;gap:.7mm;page-break-after:always}.label:last-child{page-break-after:auto}.logo{position:absolute;top:2mm;inset-inline-end:2mm;width:7mm;height:5mm;object-fit:contain}.copy{display:flex;min-width:0;flex-direction:column;gap:.2mm;padding-inline-end:${enabled(settings, "labelShowLogo", false) ? "8mm" : "0"}}.copy strong{overflow:hidden;font-size:${height < 24 ? "8px" : "10px"};line-height:1.12;text-overflow:ellipsis;white-space:nowrap}.copy small,.code{font-size:7px;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.price{font-size:${height >= 35 ? "20px" : height < 24 ? "14px" : "17px"};line-height:1;font-weight:800;white-space:nowrap;font-variant-numeric:tabular-nums}.price small{font-size:9px;font-weight:600}.barcode{width:100%;max-width:${Math.max(20, width - 5)}mm;min-width:0;margin:auto auto 0;padding-inline:1mm;direction:ltr;background:#fff}.barcode svg{display:block;width:100%;height:auto;max-height:${Math.max(7, Math.min(10, height * .32))}mm}.code{margin-top:auto;text-align:center;direction:ltr}`);
 }
 
 const sampleSale = () => ({ sale_number: "POS-PREVIEW-001", created_at: new Date().toISOString(), customer_name: "Customer", subtotal: 3200, discount_total: 200, tax_total: 0, total: 3000, payment_method: "CASH", amount_tendered: 5000, change_due: 2000 });
@@ -197,6 +198,9 @@ async function printHtml(html: string, printerName?: string, pageSize?: { width:
   const printWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
   try {
     await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const printers = await printWindow.webContents.getPrintersAsync();
+    if (!printers.length) throw new Error("NO_SYSTEM_PRINTERS");
+    if (printerName && !printers.some((printer) => printer.name === printerName)) throw new Error("PRINTER_NOT_FOUND");
     await new Promise<void>((resolve, reject) => printWindow.webContents.print({ silent: true, printBackground: true, deviceName: printerName || undefined, margins: { marginType: "none" }, ...(pageSize ? { pageSize } : {}) }, (success, reason) => success ? resolve() : reject(new Error(reason || "Printing failed"))));
   } finally {
     printWindow.destroy();
@@ -221,7 +225,7 @@ export function previewPriceLabel(database: PosDatabase, productLocalId?: string
 }
 
 export async function printReceipt(database: PosDatabase, saleId: string, printerName?: string) {
-  await printHtml(previewReceipt(database, saleId), printerName);
+  await printHtml(previewReceipt(database, saleId), printerName || database.getSetting("printerName") || undefined);
 }
 
 export async function printPriceLabels(database: PosDatabase, items: Array<{ productLocalId: string; copies: number }>, printerName?: string) {
@@ -237,14 +241,14 @@ export async function printPriceLabels(database: PosDatabase, items: Array<{ pro
 }
 
 export async function testPrinter(database: PosDatabase, printerName?: string, draft: PrintSettings = {}) {
-  await printHtml(previewReceipt(database, undefined, draft), printerName);
+  await printHtml(previewReceipt(database, undefined, draft), printerName || draft.printerName || database.getSetting("printerName") || undefined);
 }
 
 export async function testPriceLabel(database: PosDatabase, printerName?: string, draft: PrintSettings = {}) {
   const settings = { ...database.getSettings(), ...draft };
   const width = numberSetting(settings, "labelWidth", 50, 25, 100);
   const height = numberSetting(settings, "labelHeight", 30, 15, 100);
-  await printHtml(priceLabelHtml([{ product: sampleProduct(), copies: 1 }], settings), printerName, {
+  await printHtml(priceLabelHtml([{ product: sampleProduct(), copies: 1 }], settings), printerName || settings.labelPrinterName || undefined, {
     width: Math.round(width * 1000),
     height: Math.round(height * 1000),
   });
