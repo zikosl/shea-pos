@@ -314,10 +314,17 @@ export class SyncService {
             { id: payload.serverId, stock: Math.round(payload.stock) },
             session.accessToken,
           );
+        } else if (row.operation === "UPDATE_BARCODE") {
+          await graphqlRequest(
+            session.endpoint,
+            `mutation AssignPosBarcode($id: Int!, $vendorBarcode: String!) { updateProduct(id: $id, vendorBarcode: $vendorBarcode) { id } }`,
+            { id: payload.serverId, vendorBarcode: payload.vendorBarcode },
+            session.accessToken,
+          );
         } else if (row.operation === "UPDATE_PRODUCT") {
           await graphqlRequest(
             session.endpoint,
-            `mutation UpdatePosProduct($id: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $discount: Float, $stock: Int, $reorderThreshold: Int, $trackInventory: Boolean, $available: Boolean, $isVisibleInPos: Boolean, $isActive: Boolean) { updateProduct(id: $id, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, discount: $discount, stock: $stock, reorderThreshold: $reorderThreshold, trackInventory: $trackInventory, available: $available, isVisibleInPos: $isVisibleInPos, isActive: $isActive) { id } }`,
+            `mutation UpdatePosProduct($id: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $discount: Float, $stock: Int, $reorderThreshold: Int, $trackInventory: Boolean, $available: Boolean, $isVisibleInPos: Boolean, $isActive: Boolean, $vendorBarcode: String) { updateProduct(id: $id, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, discount: $discount, stock: $stock, reorderThreshold: $reorderThreshold, trackInventory: $trackInventory, available: $available, isVisibleInPos: $isVisibleInPos, isActive: $isActive, vendorBarcode: $vendorBarcode) { id } }`,
             {
               ...payload,
               id: payload.serverId,

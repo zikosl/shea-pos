@@ -679,7 +679,7 @@ export class PosDatabase {
       const upsertProduct = this.db
         .prepare(`INSERT INTO products(local_id,server_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,barcode,image,remote_image_url,price,cost_price,discount,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,price_on_request,provisional,updated_at)
         VALUES (@local_id,@server_id,@variant_id,@template_id,@category_id,@product_type_id,@brand_id,@name,@variant_name,@sku,@barcode,@image,@image,@price,@cost_price,@discount,@stock,@reorder_threshold,@inventory_policy,@available,@visible_in_pos,@active,@price_on_request,0,CURRENT_TIMESTAMP)
-        ON CONFLICT(local_id) DO UPDATE SET server_id=excluded.server_id,variant_id=excluded.variant_id,template_id=excluded.template_id,category_id=excluded.category_id,product_type_id=excluded.product_type_id,brand_id=excluded.brand_id,name=excluded.name,variant_name=excluded.variant_name,sku=excluded.sku,barcode=excluded.barcode,image=excluded.image,remote_image_url=excluded.remote_image_url,image_sync_state=CASE WHEN COALESCE(products.remote_image_url,'')<>COALESCE(excluded.remote_image_url,'') THEN 'PENDING' ELSE products.image_sync_state END,price=excluded.price,cost_price=excluded.cost_price,discount=excluded.discount,stock=excluded.stock,reorder_threshold=excluded.reorder_threshold,inventory_policy=excluded.inventory_policy,available=excluded.available,visible_in_pos=excluded.visible_in_pos,active=excluded.active,price_on_request=excluded.price_on_request,provisional=0,updated_at=CURRENT_TIMESTAMP`);
+        ON CONFLICT(local_id) DO UPDATE SET server_id=excluded.server_id,variant_id=excluded.variant_id,template_id=excluded.template_id,category_id=excluded.category_id,product_type_id=excluded.product_type_id,brand_id=excluded.brand_id,name=excluded.name,variant_name=excluded.variant_name,sku=excluded.sku,barcode=CASE WHEN EXISTS(SELECT 1 FROM outbox WHERE aggregate_id=products.local_id AND operation IN ('UPDATE_PRODUCT','UPDATE_BARCODE') AND state<>'SYNCED' AND json_extract(payload_json,'$.vendorBarcode') IS NOT NULL) THEN products.barcode ELSE excluded.barcode END,image=excluded.image,remote_image_url=excluded.remote_image_url,image_sync_state=CASE WHEN COALESCE(products.remote_image_url,'')<>COALESCE(excluded.remote_image_url,'') THEN 'PENDING' ELSE products.image_sync_state END,price=excluded.price,cost_price=excluded.cost_price,discount=excluded.discount,stock=excluded.stock,reorder_threshold=excluded.reorder_threshold,inventory_policy=excluded.inventory_policy,available=excluded.available,visible_in_pos=excluded.visible_in_pos,active=excluded.active,price_on_request=excluded.price_on_request,provisional=0,updated_at=CURRENT_TIMESTAMP`);
 
       this.db.exec(
         "DELETE FROM niches; DELETE FROM categories; DELETE FROM product_types; DELETE FROM brands; DELETE FROM templates; DELETE FROM variants;",
@@ -784,7 +784,7 @@ export class PosDatabase {
           name: row.customName ?? template?.name ?? "Product",
           variant_name: row.variant?.name ?? null,
           sku: row.vendorSku ?? row.variant?.sku ?? null,
-          barcode: row.vendorBarcode ?? null,
+          barcode: row.vendorBarcode ?? row.variant?.barcode ?? null,
           image:
             row.customImages?.[0] ??
             row.variant?.images?.[0]?.url ??
@@ -2084,6 +2084,7 @@ export class PosDatabase {
     visibleInPos?: boolean;
     active?: boolean;
     priceOnRequest?: boolean;
+    vendorBarcode?: string;
     gatewayCommitted?: boolean;
   }) {
     return this.db.transaction(() => {
@@ -2091,6 +2092,13 @@ export class PosDatabase {
         .prepare("SELECT * FROM products WHERE local_id=?")
         .get(input.productLocalId) as any;
       if (!product) throw new Error("Product not found");
+      if (input.vendorBarcode) {
+        if (!product.server_id) throw new Error("Sync this product before assigning a barcode");
+        const duplicate = this.db.prepare(
+          "SELECT local_id FROM products WHERE local_id<>? AND (UPPER(barcode)=UPPER(?) OR UPPER(sku)=UPPER(?)) LIMIT 1",
+        ).get(input.productLocalId, input.vendorBarcode, input.vendorBarcode);
+        if (duplicate) throw new Error("This code is already assigned to another product");
+      }
       const next = {
         price: input.price ?? product.price,
         costPrice: input.costPrice ?? product.cost_price,
@@ -2126,7 +2134,7 @@ export class PosDatabase {
       };
       this.db
         .prepare(
-          "UPDATE products SET price=?,cost_price=?,discount=?,stock=?,reorder_threshold=?,inventory_policy=?,available=?,visible_in_pos=?,active=?,price_on_request=?,updated_at=CURRENT_TIMESTAMP WHERE local_id=?",
+          "UPDATE products SET price=?,cost_price=?,discount=?,stock=?,reorder_threshold=?,inventory_policy=?,available=?,visible_in_pos=?,active=?,price_on_request=?,barcode=COALESCE(?,barcode),updated_at=CURRENT_TIMESTAMP WHERE local_id=?",
         )
         .run(
           next.price,
@@ -2139,6 +2147,7 @@ export class PosDatabase {
           next.visible,
           next.active,
           next.priceOnRequest,
+          input.vendorBarcode ?? null,
           input.productLocalId,
         );
       if (
@@ -2160,8 +2169,14 @@ export class PosDatabase {
             new Date().toISOString(),
           );
       }
+      const barcodeOnly = input.vendorBarcode && [input.price, input.costPrice, input.discount,
+        input.stock, input.reorderThreshold, input.trackInventory, input.available,
+        input.visibleInPos, input.active, input.priceOnRequest].every((value) => value === undefined);
       if (product.server_id && !input.gatewayCommitted)
-        this.enqueue("UPDATE_PRODUCT", "Product", input.productLocalId, {
+        this.enqueue(barcodeOnly ? "UPDATE_BARCODE" : "UPDATE_PRODUCT", "Product", input.productLocalId, barcodeOnly ? {
+          serverId: product.server_id,
+          vendorBarcode: input.vendorBarcode,
+        } : {
           serverId: product.server_id,
           price: next.price,
           costPrice: next.costPrice,
@@ -2173,6 +2188,7 @@ export class PosDatabase {
           isVisibleInPos: Boolean(next.visible),
           isActive: Boolean(next.active),
           priceOnRequest: Boolean(next.priceOnRequest),
+          ...(input.vendorBarcode ? { vendorBarcode: input.vendorBarcode } : {}),
         });
       return this.db
         .prepare("SELECT * FROM products WHERE local_id=?")

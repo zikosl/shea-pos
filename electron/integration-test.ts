@@ -67,6 +67,16 @@ async function main() {
       );
       insert.run("tracked", 1, "Tracked item", 100, 60, 5, "TRACKED");
       insert.run("unlimited", 2, "Service item", 50, 10, 0, "UNLIMITED");
+      const assigned = database.updateProduct({ productLocalId: "tracked", vendorBarcode: "SHEA-TEST-001" }) as any;
+      assert.equal(assigned.barcode, "SHEA-TEST-001");
+      assert.equal((database.listInventory({ search: "SHEA-TEST-001" }) as any[])[0].local_id, "tracked");
+      assert.throws(
+        () => database.updateProduct({ productLocalId: "unlimited", vendorBarcode: "SHEA-TEST-001" }),
+        /already assigned/,
+      );
+      const barcodeUpdate = database.pendingOutbox().find((row) => row.operation === "UPDATE_BARCODE" && JSON.parse(row.payload_json).vendorBarcode === "SHEA-TEST-001");
+      assert.ok(barcodeUpdate);
+      database.markOutboxSynced(barcodeUpdate.id);
       database.holdCart({ customerName: "Held customer", lines: [{ productLocalId: "tracked", quantity: 1 }] });
       const held = database.listHeldCarts() as any[];
       assert.equal(held.length, 1);

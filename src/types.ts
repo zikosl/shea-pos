@@ -36,6 +36,7 @@ export type AppState = {
 export type Product = {
   local_id: string;
   server_id?: number;
+  template_id?: number;
   name: string;
   name_ar?: string;
   variant_name?: string;

@@ -105,6 +105,7 @@ const documentSchema = z.object({
 const stockEntryDocumentSchema = z.object({ id: z.string().uuid(), printerName: z.string().optional() });
 const productUpdateSchema = z.object({
   productLocalId: z.string().min(1),
+  vendorBarcode: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._:-]+$/).optional(),
   price: z.number().min(0).optional(),
   costPrice: z.number().min(0).optional(),
   discount: z.number().min(0).optional(),
@@ -670,6 +671,9 @@ export function registerIpc(
   { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:update-product", async (raw) => {
     const input = productUpdateSchema.parse(raw);
+    if (input.vendorBarcode && gateway.enabled()) {
+      throw new Error("Barcode assignment is not available through the local gateway yet. Connect this POS directly to the cloud to assign it.");
+    }
     if (gateway.enabled()) await gateway.updateProduct(input);
     const result = database.updateProduct({ ...input, gatewayCommitted: gateway.enabled() });
     if (gateway.enabled()) await gateway.refreshProducts();

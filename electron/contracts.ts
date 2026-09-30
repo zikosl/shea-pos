@@ -270,6 +270,7 @@ export type PosApi = {
   }): Promise<unknown>;
   updateProduct(input: {
     productLocalId: string;
+    vendorBarcode?: string;
     price?: number;
     costPrice?: number;
     discount?: number;

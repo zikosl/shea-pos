@@ -17,6 +17,7 @@ import {
   ReceiptText,
   RefreshCw,
   Settings,
+  ScanLine,
   ShoppingBag,
   UsersRound,
   UserRoundCog,
@@ -25,6 +26,7 @@ import { CatalogRequestsScreen } from "./features/catalog/CatalogRequestsScreen"
 import { InvoicesScreen, OrdersScreen } from "./features/history/HistoryScreens";
 import { InventoryScreen } from "./features/inventory/InventoryScreen";
 import { StockEntriesScreen } from "./features/inventory/StockEntriesScreen";
+import { BarcodeManagerScreen } from "./features/barcodes/BarcodeManagerScreen";
 import { PosScreen } from "./features/pos/PosScreen";
 import { SettingsScreen } from "./features/settings/SettingsScreen";
 import { ReportsScreen } from "./features/reports/ReportsScreen";
@@ -49,7 +51,7 @@ import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { DeploymentSetupScreen } from "./features/setup/DeploymentSetupScreen";
 
 type Page =
-  "pos" | "stock" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
+  "pos" | "stock" | "barcodes" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
 const emptyState: AppState = {
   authenticated: false,
   user: null,
@@ -72,6 +74,7 @@ const emptyState: AppState = {
 const pagePermission: Record<Page, Permission> = {
   pos: "POS_SELL",
   stock: "INVENTORY_VIEW",
+  barcodes: "INVENTORY_MANAGE",
   entries: "STOCK_RECEIVE",
   gifts: "CUSTOM_ORDERS_VIEW",
   orders: "ORDERS_VIEW",
@@ -83,7 +86,7 @@ const pagePermission: Record<Page, Permission> = {
 };
 
 function firstAllowedPage(granted: Permission[]): Page {
-  const preferred: Page[] = ["pos", "gifts", "orders", "stock", "entries", "sales", "reports", "requests", "team", "settings"];
+  const preferred: Page[] = ["pos", "gifts", "orders", "stock", "barcodes", "entries", "sales", "reports", "requests", "team", "settings"];
   return preferred.find((candidate) => granted.includes(pagePermission[candidate])) ?? "pos";
 }
 
@@ -309,6 +312,7 @@ export default function App() {
   const navigation = [
     { id: "pos", label: t("sell"), icon: ShoppingBag, permission: "POS_SELL" },
     { id: "stock", label: t("inventory"), icon: Boxes, permission: "INVENTORY_VIEW" },
+    { id: "barcodes", label: t("barcodeManager"), icon: ScanLine, permission: "INVENTORY_MANAGE" },
     { id: "entries", label: t("stockEntries"), icon: PackagePlus, permission: "STOCK_RECEIVE" },
     ...(state.capabilities.includes("CUSTOM_ORDERS") ? [{ id: "gifts" as const, label: t("customOrders"), icon: Gift, permission: "CUSTOM_ORDERS_VIEW" as const }] : []),
     { id: "orders", label: t("orders"), icon: FileClock, permission: "ORDERS_VIEW" },
@@ -570,6 +574,7 @@ export default function App() {
               <PosScreen onNotice={setNotice} onChanged={refreshState} />
             )}
             {page === "stock" && <InventoryScreen onNotice={setNotice} />}
+            {page === "barcodes" && <BarcodeManagerScreen onNotice={setNotice} onChanged={refreshState} gatewayMode={settings.deploymentMode === "multi"} />}
             {page === "entries" && <StockEntriesScreen onNotice={setNotice} settings={settings} />}
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen />}

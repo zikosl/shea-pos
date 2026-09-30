@@ -5752,3 +5752,31 @@ body *::after {
   .deployment-card { padding: 26px 20px; border-radius: 22px; }
   .deployment-options { grid-template-columns: 1fr; }
 }
+.barcode-workspace { display: grid; gap: 14px; max-width: 820px; }
+.barcode-main { padding: 22px; }
+.barcode-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.barcode-heading > svg { width: 25px; height: 25px; color: var(--primary); }
+.barcode-heading h2 { margin: 0; font-size: 20px; }
+.barcode-heading p, .barcode-help { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.barcode-scan label { display: block; margin-bottom: 7px; font-size: 13px; font-weight: 600; }
+.barcode-input-row, .barcode-actions { display: flex; gap: 10px; }
+.barcode-input-row input, .barcode-search { min-width: 0; flex: 1; height: 45px; padding: 0 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
+.barcode-input-row { margin-bottom: 12px; }
+.barcode-main > .button { margin-top: 12px; }
+.barcode-step { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 50%; background: var(--surface-2); font-weight: 700; }
+.barcode-search { width: 100%; margin-bottom: 12px; }
+.barcode-results { display: grid; gap: 8px; max-height: 420px; overflow: auto; }
+.barcode-product { display: flex; align-items: center; width: 100%; min-height: 58px; gap: 12px; padding: 8px 10px; border: 0; border-radius: 10px; background: var(--surface-2); color: var(--text); text-align: start; cursor: pointer; }
+.barcode-product:hover { outline: 1px solid var(--primary); }
+.barcode-product:disabled { opacity: .55; cursor: not-allowed; }
+.barcode-product img { width: 42px; height: 42px; border-radius: 7px; object-fit: contain; background: white; }
+.barcode-product span, .barcode-confirm > div { display: grid; gap: 3px; }
+.barcode-product small, .barcode-confirm small { color: var(--muted); }
+.barcode-result { display: flex; align-items: flex-start; gap: 12px; margin-top: 18px; padding: 13px; border-radius: 10px; background: var(--surface-2); }
+.barcode-result > svg { flex: none; width: 19px; color: var(--primary); }
+.barcode-result p { margin: 4px 0; }
+.barcode-result code, .barcode-confirm code { display: block; margin-top: 5px; overflow-wrap: anywhere; font-size: 13px; }
+.barcode-confirm { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px; border-radius: 10px; background: var(--surface-2); }
+.barcode-actions { justify-content: flex-end; margin-top: 20px; }
+.barcode-error { color: var(--danger); font-size: 13px; }
+@media (max-width: 640px) { .barcode-input-row, .barcode-confirm { flex-direction: column; align-items: stretch; } }
