@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
-import { mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { app, BrowserWindow, protocol, shell } from "electron";
 import { PosDatabase } from "./database";
 import { registerIpc } from "./ipc";
@@ -18,9 +18,10 @@ let backupTimer: NodeJS.Timeout | null = null;
 let updater: PosUpdater | null = null;
 
 function applicationIcon() {
-  return app.isPackaged
+  const iconPath = app.isPackaged
     ? path.join(process.resourcesPath, "icon.png")
     : path.join(__dirname, "../build/icon.png");
+  return existsSync(iconPath) ? iconPath : undefined;
 }
 
 function createWindow() {
@@ -96,7 +97,8 @@ else {
     }
   });
   app.whenReady().then(() => {
-    if (process.platform === "darwin") app.dock?.setIcon(applicationIcon());
+    const icon = applicationIcon();
+    if (process.platform === "darwin" && icon) app.dock?.setIcon(icon);
     PosDatabase.applyStagedRestore(app.getPath("userData"));
     database = new PosDatabase(app.getPath("userData"));
     void runAutomaticBackup(database).catch((error) => database?.setSetting("lastBackupError", error instanceof Error ? error.message : "Backup failed"));

@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleDollarSign,
+  Filter,
   LoaderCircle,
   PackageOpen,
   Pause,
@@ -45,6 +46,7 @@ export function PosScreen({
     [search, setSearch] = useState(""),
     [customerName, setCustomerName] = useState("");
   const [categoryId, setCategoryId] = useState<number>(),
+    [nicheId, setNicheId] = useState<number>(),
     [offset, setOffset] = useState(0),
     [busy, setBusy] = useState(false);
   const [cashSession, setCashSession] = useState<any>(null),
@@ -66,6 +68,7 @@ export function PosScreen({
         window.pos.listProducts({
           search,
           categoryId,
+          nicheId,
           limit: PAGE_SIZE,
           offset,
         }),
@@ -83,7 +86,11 @@ export function PosScreen({
   };
   useEffect(() => {
     void load();
-  }, [search, categoryId, offset]);
+  }, [search, categoryId, nicheId, offset]);
+  const visibleCategories = useMemo(
+    () => catalog?.categories.filter((category) => !nicheId || category.niche_id === nicheId) ?? [],
+    [catalog, nicheId],
+  );
   const total = useMemo(
     () =>
       cart.reduce(
@@ -254,7 +261,7 @@ export function PosScreen({
               <strong>{t("allCategoriesShort")}</strong>
               <small>{t("productsAvailable")}</small>
             </button>
-            {catalog?.categories.map((item) => (
+            {visibleCategories.map((item) => (
               <button
                 className={`category-tile ${categoryId === item.id ? "active" : ""}`}
                 key={item.id}
@@ -279,26 +286,45 @@ export function PosScreen({
               </button>
             ))}
           </div>
-          <div className="pos-search">
-            <Search />
-            <input
-              data-keyboard-search
-              ref={searchRef}
-              value={search}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setOffset(0);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void scanProduct();
-                }
-              }}
-              placeholder={t("searchProducts")}
-              autoFocus
-            />
-            <kbd>F2</kbd>
+          <div className="pos-search-row">
+            <div className="pos-search">
+              <Search />
+              <input
+                data-keyboard-search
+                ref={searchRef}
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setOffset(0);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void scanProduct();
+                  }
+                }}
+                placeholder={t("searchProducts")}
+                autoFocus
+              />
+              <kbd>F2</kbd>
+            </div>
+            {catalog && catalog.niches.length > 1 ? (
+              <label className="pos-niche-filter" title={t("niche")}>
+                <Filter aria-hidden="true" />
+                <select
+                  aria-label={t("niche")}
+                  value={nicheId ?? ""}
+                  onChange={(event) => {
+                    setNicheId(event.target.value ? Number(event.target.value) : undefined);
+                    setCategoryId(undefined);
+                    setOffset(0);
+                  }}
+                >
+                  <option value="">{t("allNiches")}</option>
+                  {catalog.niches.map((niche) => <option key={niche.id} value={niche.id}>{localized(niche)}</option>)}
+                </select>
+              </label>
+            ) : null}
           </div>
           {loading ? (
             <LoadingState label={t("loadingData")} />

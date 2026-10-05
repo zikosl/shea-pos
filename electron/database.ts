@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
+import { resolveProductImageUrl } from "./image-url";
 import type {
   ActivateProductInput,
   CheckoutInput,
@@ -426,6 +427,23 @@ export class PosDatabase {
         `);
         this.db.prepare("INSERT INTO schema_migrations(version) VALUES (15)").run();
       })();
+    const hasOrderActivityMigration = this.db.prepare("SELECT 1 FROM schema_migrations WHERE version=16").get();
+    if (!hasOrderActivityMigration)
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE order_activity (
+            id TEXT PRIMARY KEY, order_type TEXT NOT NULL, order_id TEXT NOT NULL,
+            action TEXT NOT NULL, from_status TEXT, to_status TEXT,
+            operator_id TEXT NOT NULL, operator_name TEXT NOT NULL,
+            outbox_id TEXT, created_at TEXT NOT NULL
+          );
+          CREATE INDEX order_activity_order_idx ON order_activity(order_type,order_id,created_at DESC);
+          CREATE INDEX order_activity_operator_idx ON order_activity(operator_id,created_at DESC);
+          CREATE INDEX sales_operator_date_idx ON sales(operator_id,created_at DESC);
+          CREATE INDEX sale_refunds_operator_date_idx ON sale_refunds(operator_id,created_at DESC);
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version) VALUES (16)").run();
+      })();
   }
 
   private productImageUrl(row: any) {
@@ -451,6 +469,14 @@ export class PosDatabase {
     } catch {
       return null;
     }
+  }
+
+  // Use the vetted server URL only until the offline image cache is ready.
+  // The local file remains the preferred source for reliable offline selling.
+  private remoteProductImageUrl(row: any) {
+    const remote = String(row.remote_image_url ?? "").trim();
+    const assetBase = this.getSetting("assetBase") ?? "";
+    return resolveProductImageUrl(remote, assetBase)?.toString() ?? null;
   }
 
   productImageCandidates() {
@@ -995,7 +1021,7 @@ export class PosDatabase {
       );
     return (rows as any[]).map((row) => ({
       ...row,
-      image: this.productImageUrl(row),
+      image: this.productImageUrl(row) ?? this.remoteProductImageUrl(row),
     }));
   }
 
@@ -1018,7 +1044,7 @@ export class PosDatabase {
       );
     return (rows as any[]).map((row) => ({
       ...row,
-      image: this.productImageUrl(row),
+      image: this.productImageUrl(row) ?? this.remoteProductImageUrl(row),
     }));
   }
 
@@ -1057,6 +1083,57 @@ export class PosDatabase {
     return this.db
       .prepare("SELECT * FROM sales ORDER BY created_at DESC LIMIT 250")
       .all();
+  }
+
+  workerActivity(input: { operatorId?: string; from?: string; to?: string }) {
+    const operatorId = input.operatorId || null;
+    const from = input.from || null;
+    const to = input.to || null;
+    const sales = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) sale_count,
+      COALESCE(SUM(total),0) sales_total FROM sales
+      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      GROUP BY operator_id,operator_name`).all(operatorId, operatorId, from, from, to, to) as any[];
+    const refunds = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) refund_count,
+      COALESCE(SUM(amount),0) refunds_total FROM sale_refunds
+      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      GROUP BY operator_id,operator_name`).all(operatorId, operatorId, from, from, to, to) as any[];
+    const orders = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) action_count,
+      SUM(CASE WHEN action='CREATE_CUSTOM_ORDER' THEN 1 ELSE 0 END) created_count
+      FROM order_activity WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?)
+      AND (? IS NULL OR created_at<=?) GROUP BY operator_id,operator_name`)
+      .all(operatorId, operatorId, from, from, to, to) as any[];
+    const entries = this.db.prepare(`SELECT id,sale_number reference,'SALE' action,total amount,
+      operator_id,operator_name,created_at FROM sales
+      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      UNION ALL
+      SELECT r.id,s.sale_number,'REFUND',r.amount,r.operator_id,r.operator_name,r.created_at
+      FROM sale_refunds r JOIN sales s ON s.id=r.sale_id
+      WHERE (? IS NULL OR r.operator_id=?) AND (? IS NULL OR r.created_at>=?) AND (? IS NULL OR r.created_at<=?)
+      ORDER BY created_at DESC LIMIT 500`).all(operatorId, operatorId, from, from, to, to,
+        operatorId, operatorId, from, from, to, to);
+    const orderEntries = this.db.prepare(`SELECT a.id,a.order_type,a.order_id,a.action,a.to_status,
+      a.operator_id,a.operator_name,a.created_at,COALESCE(o.state,'SYNCED') sync_state,
+      COALESCE(c.order_number,CASE WHEN a.order_type='ONLINE' THEN '#' || a.order_id ELSE a.order_id END) reference
+      FROM order_activity a LEFT JOIN outbox o ON o.id=a.outbox_id
+      LEFT JOIN custom_orders c ON a.order_type='GIFT' AND c.id=a.order_id
+      WHERE (? IS NULL OR a.operator_id=?) AND (? IS NULL OR a.created_at>=?)
+      AND (? IS NULL OR a.created_at<=?) ORDER BY a.created_at DESC LIMIT 200`)
+      .all(operatorId, operatorId, from, from, to, to);
+    return { sales, refunds, orders, entries, orderEntries };
+  }
+
+  orderActivity(orderType: "ONLINE" | "GIFT", orderId: string) {
+    return this.db.prepare(`SELECT a.id,a.action,a.from_status,a.to_status,a.operator_id,a.operator_name,a.created_at,
+      COALESCE(o.state,'SYNCED') sync_state,o.last_error
+      FROM order_activity a LEFT JOIN outbox o ON o.id=a.outbox_id
+      WHERE a.order_type=? AND a.order_id=? ORDER BY a.created_at DESC LIMIT 100`).all(orderType, orderId);
+  }
+
+  private recordOrderActivity(orderType: "ONLINE" | "GIFT", orderId: string, action: string,
+    fromStatus: string | null, toStatus: string | null, operator: { id: string; name: string }, outboxId: string) {
+    this.db.prepare(`INSERT INTO order_activity(id,order_type,order_id,action,from_status,to_status,operator_id,operator_name,outbox_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), orderType, orderId, action, fromStatus, toStatus,
+      operator.id, operator.name, outboxId, new Date().toISOString());
   }
 
   getSaleDetails(id: string) {
@@ -1098,13 +1175,14 @@ export class PosDatabase {
       .prepare("SELECT * FROM orders ORDER BY updated_at DESC LIMIT 100")
       .all();
   }
-  queueOnlineOrderCommand(id: number, operation: "TRANSITION_ONLINE_ORDER" | "CREATE_ONLINE_ORDER_QUOTATION", optimisticStatus: string, command: Record<string, unknown>) {
+  queueOnlineOrderCommand(id: number, operation: "TRANSITION_ONLINE_ORDER" | "CREATE_ONLINE_ORDER_QUOTATION", optimisticStatus: string, command: Record<string, unknown>, operator: { id: string; name: string }) {
     const row = this.db.prepare("SELECT * FROM orders WHERE server_id=?").get(id) as any;
     if (!row) throw new Error("Order not found");
     if (Number(command.expectedVersion) !== Number(row.version)) throw new Error("ORDER_VERSION_CONFLICT");
     this.db.transaction(() => {
       this.db.prepare("UPDATE orders SET status=?,version=version+1,sync_state='PENDING',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE server_id=?").run(optimisticStatus, id);
-      this.enqueue(operation, "Order", String(id), command);
+      const outboxId = this.enqueue(operation, "Order", String(id), command);
+      this.recordOrderActivity("ONLINE", String(id), operation, row.status, optimisticStatus, operator, outboxId);
     })();
     return this.db.prepare("SELECT * FROM orders WHERE server_id=?").get(id);
   }
@@ -1119,7 +1197,7 @@ export class PosDatabase {
       "SELECT * FROM custom_orders ORDER BY CASE WHEN required_at IS NULL THEN 1 ELSE 0 END,required_at,updated_at DESC",
     ).all();
   }
-  createCustomOrder(input: CreateCustomOrderInput) {
+  createCustomOrder(input: CreateCustomOrderInput, operator: { id: string; name: string }) {
     const id = randomUUID();
     const now = new Date().toISOString();
     const orderNumber = `GFT-LOCAL-${Date.now().toString(36).toUpperCase()}`;
@@ -1142,24 +1220,26 @@ export class PosDatabase {
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO custom_orders(id,order_number,customer_name,status,required_at,fulfillment_mode,total,version,payload_json,sync_state,created_at,updated_at,niche_id)
         VALUES (?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)`).run(id, orderNumber, input.customerName.trim(), "REQUESTED", input.requiredAt ?? null, input.fulfillmentMode, snapshot.total, 1, JSON.stringify(snapshot), now, now, input.nicheId ?? null);
-      this.enqueue("CREATE_CUSTOM_ORDER", "CustomOrder", id, payload);
+      const outboxId = this.enqueue("CREATE_CUSTOM_ORDER", "CustomOrder", id, payload);
+      this.recordOrderActivity("GIFT", id, "CREATE_CUSTOM_ORDER", null, "REQUESTED", operator, outboxId);
     })();
     return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
   }
 
-  transitionCustomOrder(id: string, status: string) {
+  transitionCustomOrder(id: string, status: string, operator: { id: string; name: string }) {
     const row = this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id) as any;
     if (!row) throw new Error("Custom order not found");
     if (!row.server_id) throw new Error("Synchronize this new order before changing its workflow");
     const expectedVersion = row.version;
     this.db.transaction(() => {
       this.db.prepare("UPDATE custom_orders SET status=?,version=version+1,sync_state='PENDING',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, id);
-      this.enqueue("TRANSITION_CUSTOM_ORDER", "CustomOrder", id, { serverId: row.server_id, status, expectedVersion });
+      const outboxId = this.enqueue("TRANSITION_CUSTOM_ORDER", "CustomOrder", id, { serverId: row.server_id, status, expectedVersion });
+      this.recordOrderActivity("GIFT", id, "TRANSITION_CUSTOM_ORDER", row.status, status, operator, outboxId);
     })();
     return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
   }
 
-  queueCustomOrderCommand(id: string, operation: "CREATE_CUSTOM_ORDER_QUOTATION" | "RESERVE_CUSTOM_ORDER_MATERIALS", optimisticStatus: string, command: Record<string, unknown> = {}) {
+  queueCustomOrderCommand(id: string, operation: "CREATE_CUSTOM_ORDER_QUOTATION" | "RESERVE_CUSTOM_ORDER_MATERIALS", optimisticStatus: string, command: Record<string, unknown>, operator: { id: string; name: string }) {
     const row = this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id) as any;
     if (!row) throw new Error("Custom order not found");
     if (!row.server_id) throw new Error("Synchronize this new order before changing its workflow");
@@ -1176,7 +1256,8 @@ export class PosDatabase {
       }
       this.db.prepare("UPDATE custom_orders SET status=?,version=version+?,total=?,payload_json=?,sync_state='PENDING',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(optimisticStatus, versionIncrement, total, payloadJson, id);
       const { id: _ignored, ...payload } = command;
-      this.enqueue(operation, "CustomOrder", id, { ...payload, serverId: row.server_id });
+      const outboxId = this.enqueue(operation, "CustomOrder", id, { ...payload, serverId: row.server_id });
+      this.recordOrderActivity("GIFT", id, operation, row.status, optimisticStatus, operator, outboxId);
     })();
     return this.db.prepare("SELECT * FROM custom_orders WHERE id=?").get(id);
   }
@@ -2204,12 +2285,13 @@ export class PosDatabase {
     state = "PENDING",
   ) {
     const now = new Date().toISOString();
+    const id = randomUUID();
     this.db
       .prepare(
         "INSERT INTO outbox(id,operation,aggregate_type,aggregate_id,payload_json,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
       )
       .run(
-        randomUUID(),
+        id,
         operation,
         aggregateType,
         aggregateId,
@@ -2218,6 +2300,7 @@ export class PosDatabase {
         now,
         now,
       );
+    return id;
   }
 
   markOutboxSynced(id: string) {

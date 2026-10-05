@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Check,
   DatabaseBackup,
@@ -79,10 +79,12 @@ export function SettingsScreen({
   const { t, language } = useI18n();
   const [printers, setPrinters] = useState<any[]>([]);
   const [draft, setDraft] = useState(() => settingsDraft(values));
+  const [savedDraft, setSavedDraft] = useState(() => settingsDraft(values));
+  const previousValues = useRef(values);
   const [tab, setTab] = useState<PrintTab>("receipt");
   const [section, setSection] = useState<SettingsTab>("general");
   const [previewHtml, setPreviewHtml] = useState("");
-  const [previewRevision, setPreviewRevision] = useState(0);
+  const [previewForTab, setPreviewForTab] = useState<PrintTab | null>(null);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [loadingPrinters, setLoadingPrinters] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -97,7 +99,17 @@ export function SettingsScreen({
   const [currentTokenId, setCurrentTokenId] = useState("");
   const [sessionsLoading, setSessionsLoading] = useState(true);
 
-  useEffect(() => setDraft(settingsDraft(values)), [values]);
+  useEffect(() => {
+    const previous = previousValues.current;
+    setDraft((current) => {
+      const next = { ...current };
+      for (const [key, value] of Object.entries(values)) {
+        if (value !== previous[key] && current[key] === previous[key]) next[key] = value;
+      }
+      return next;
+    });
+    previousValues.current = values;
+  }, [values]);
 
   function loadPrinters() {
     setLoadingPrinters(true);
@@ -124,7 +136,7 @@ export function SettingsScreen({
       .finally(() => setSessionsLoading(false));
   }
 
-  useEffect(loadAccountSessions, []);
+  useEffect(() => { if (section === "security") loadAccountSessions(); }, [section]);
 
   async function revokeSession(tokenId: string) {
     if (!window.confirm(t("signOutDeviceConfirm"))) return;
@@ -174,7 +186,7 @@ export function SettingsScreen({
         .then((html) => {
           if (!current) return;
           setPreviewHtml(html);
-          setPreviewRevision((revision) => revision + 1);
+          setPreviewForTab(tab);
         })
         .catch((value) =>
           current && onNotice(localizeError(language, value)),
@@ -190,7 +202,7 @@ export function SettingsScreen({
   function change(key: string, value: string, applyImmediately = false) {
     const next = { ...draft, [key]: value };
     setDraft(next);
-    if (applyImmediately) onChange(next);
+    if (applyImmediately) onChange({ ...values, [key]: value });
   }
 
   function changeReceipt(key: string, value: string) {
@@ -241,7 +253,9 @@ export function SettingsScreen({
     setSaving(true);
     try {
       const result = await window.pos.updateSettings(draft);
-      setDraft(settingsDraft(result));
+      const saved = settingsDraft(result);
+      setDraft(saved);
+      setSavedDraft(saved);
       onChange(result);
       onNotice(t("settingsSaved"));
     } catch (value) {
@@ -363,6 +377,7 @@ export function SettingsScreen({
 
   const selectedStore = stores.find((store) => store.id === selectedStoreId);
   const cloudProvisioningReady = Boolean(selectedStore?.cloudSyncEnabled && selectedStore.cloudGatewayUrl);
+  const hasUnsavedChanges = Object.keys(draft).some((key) => draft[key] !== savedDraft[key]);
 
   return (
     <form className="page-stack settings-form" onSubmit={save}>
@@ -370,72 +385,84 @@ export function SettingsScreen({
         eyebrow={t("workspace")}
         title={t("settings")}
         description={t("settingsTabsHelp")}
-        actions={
-          <button className="button primary" disabled={saving}>
+        actions={<div className="settings-save-actions">
+          {hasUnsavedChanges ? <><span>{t("unsavedChanges")}</span><button type="button" className="button ghost" disabled={saving} onClick={() => { setDraft(savedDraft); onChange(savedDraft); }}>{t("discardChanges")}</button></> : null}
+          <button type="submit" className="button primary" disabled={saving || !hasUnsavedChanges}>
             {saving ? <LoaderCircle className="spin" /> : <Check />}
             {saving ? t("saving") : t("saveChanges")}
           </button>
-        }
+        </div>}
       />
 
-      <nav className="settings-main-tabs" aria-label={t("settings")}>
+      <nav className="settings-main-tabs" aria-label={t("settings")} role="tablist">
         {([
           ["general", SlidersHorizontal, t("settingsGeneral")],
           ["printing", Printer, t("settingsPrinting")],
           ["connection", Network, t("settingsConnection")],
           ["security", ShieldCheck, t("settingsSecurity")],
-        ] as const).map(([value, Icon, label]) => <button key={value} type="button" aria-pressed={section === value} className={section === value ? "active" : ""} onClick={() => setSection(value)}><Icon />{label}</button>)}
+        ] as const).map(([value, Icon, label]) => <button key={value} type="button" role="tab" aria-selected={section === value} className={section === value ? "active" : ""} onClick={() => setSection(value)}><Icon />{label}</button>)}
       </nav>
 
-      <div className={`settings-overview-grid ${section === "printing" || section === "connection" ? "settings-single-panel" : ""}`}>
+      <div className={`settings-overview-grid ${section === "general" || section === "printing" || section === "connection" ? "settings-single-panel" : ""} ${section === "security" ? "settings-security-grid" : ""}`}>
         {section === "general" ? <>
-        <section className="panel settings-section">
+        <section className="panel settings-section settings-general-section">
           <div className="section-title">
             <div className="section-icon"><SlidersHorizontal /></div>
             <div><h3>{t("workspace")}</h3><p>{t("workspaceSettingsHelp")}</p></div>
           </div>
-          <label>
-            {t("storeName")}
-            <input value={draft.storeName || ""} onChange={(event) => change("storeName", event.target.value)} />
-          </label>
-          <div className="two-fields">
-            <label>
-              {t("appearance")}
-              <select value={draft.theme} onChange={(event) => change("theme", event.target.value, true)}>
-                <option value="system">{t("system")}</option>
-                <option value="light">{t("light")}</option>
-                <option value="dark">{t("dark")}</option>
-              </select>
-            </label>
-            <label>
-              {t("language")}
-              <select value={draft.language} onChange={(event) => change("language", event.target.value, true)}>
-                <option value="en">{t("english")}</option>
-                <option value="ar">{t("arabic")}</option>
-              </select>
-            </label>
+          <div className="settings-groups-grid">
+            <section className="settings-group settings-identity-group">
+              <h4>{t("storeProfile")}</h4>
+              <label>
+                {t("storeName")}
+                <input value={draft.storeName || ""} onChange={(event) => change("storeName", event.target.value)} />
+              </label>
+              <label>
+                {t("storeLogo")}
+                <div className="logo-picker">
+                  {draft.storeLogo ? <img src={draft.storeLogo} alt="" /> : <span>S</span>}
+                  <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={(event) => chooseLogo(event.target.files?.[0])} />
+                  {draft.storeLogo ? <button type="button" className="button secondary" onClick={() => change("storeLogo", "", true)}>{t("removeLogo")}</button> : null}
+                </div>
+              </label>
+            </section>
+            <section className="settings-group">
+              <h4>{t("appearance")}</h4>
+              <div className="settings-control-grid">
+                <label>
+                  {t("appearance")}
+                  <select value={draft.theme} onChange={(event) => change("theme", event.target.value, true)}>
+                    <option value="system">{t("system")}</option>
+                    <option value="light">{t("light")}</option>
+                    <option value="dark">{t("dark")}</option>
+                  </select>
+                </label>
+                <label>
+                  {t("language")}
+                  <select value={draft.language} onChange={(event) => change("language", event.target.value, true)}>
+                    <option value="en">{t("english")}</option>
+                    <option value="ar">{t("arabic")}</option>
+                  </select>
+                </label>
+                <label className="settings-control-wide">
+                  {t("brandColor")}
+                  <input className="color-input" type="color" value={draft.primaryColor} onChange={(event) => change("primaryColor", event.target.value, true)} />
+                </label>
+              </div>
+            </section>
+            <section className="settings-group settings-access-group">
+              <h4>{t("localAccess")}</h4>
+              <label>
+                {t("sessionTimeout")}
+                <select value={draft.localSessionTimeout} onChange={(event) => change("localSessionTimeout", event.target.value)}>
+                  <option value="5">5 {t("minutes")}</option>
+                  <option value="15">15 {t("minutes")}</option>
+                  <option value="30">30 {t("minutes")}</option>
+                  <option value="60">60 {t("minutes")}</option>
+                </select>
+              </label>
+            </section>
           </div>
-          <label>
-            {t("brandColor")}
-            <input className="color-input" type="color" value={draft.primaryColor} onChange={(event) => change("primaryColor", event.target.value, true)} />
-          </label>
-          <label>
-            {t("sessionTimeout")}
-            <select value={draft.localSessionTimeout} onChange={(event) => change("localSessionTimeout", event.target.value)}>
-              <option value="5">5 {t("minutes")}</option>
-              <option value="15">15 {t("minutes")}</option>
-              <option value="30">30 {t("minutes")}</option>
-              <option value="60">60 {t("minutes")}</option>
-            </select>
-          </label>
-          <label>
-            {t("storeLogo")}
-            <div className="logo-picker">
-              {draft.storeLogo ? <img src={draft.storeLogo} alt="" /> : <span>S</span>}
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={(event) => chooseLogo(event.target.files?.[0])} />
-              {draft.storeLogo ? <button type="button" className="button secondary" onClick={() => change("storeLogo", "", true)}>{t("removeLogo")}</button> : null}
-            </div>
-          </label>
         </section>
         </> : null}
 
@@ -512,19 +539,6 @@ export function SettingsScreen({
         </section>
         </> : null}
 
-        {section === "printing" ? <>
-        <section className="panel settings-section">
-          <div className="section-title">
-            <div className="section-icon"><Printer /></div>
-            <div><h3>{t("systemPrinters")}</h3><p>{t("nativePrinterHelp")}</p></div>
-          </div>
-          {loadingPrinters ? <LoadingState label={t("loading")} compact /> : null}
-          {!loadingPrinters && !printers.length ? <p className="settings-printer-warning" role="status">{t("noSystemPrinters")}</p> : null}
-          <button type="button" className="button secondary" disabled={loadingPrinters} onClick={loadPrinters}><RefreshCw />{t("refreshPrinters")}</button>
-          <div className="info"><SlidersHorizontal /><p><strong>{t("windowsDriverTitle")}</strong><br />{t("windowsDriverHelp")}</p></div>
-        </section>
-        </> : null}
-
         {section === "security" ? <>
         <section className="panel settings-section account-sessions-section">
           <div className="section-title">
@@ -553,7 +567,7 @@ export function SettingsScreen({
           </div>
         </section>
 
-        <section className="panel settings-section">
+        <section className="panel settings-section settings-backup-section">
           <div className="section-title"><div className="section-icon"><DatabaseBackup /></div><div><h3>{t("backupAndRecovery")}</h3><p>{t("backupAndRecoveryHelp")}</p></div></div>
           <div className="gateway-actions">
             <button type="button" className="button secondary" onClick={() => void createBackup()}><DatabaseBackup />{t("createBackup")}</button>
@@ -576,11 +590,16 @@ export function SettingsScreen({
             <button type="button" className={tab === "label" ? "active" : ""} onClick={() => setTab("label")}><ScanBarcode />{t("priceLabel")}</button>
           </div>
         </div>
+        <div className="print-device-strip">
+          <div><Printer /><span><strong>{t("systemPrinters")}</strong><small>{loadingPrinters ? t("loading") : printers.length ? `${printers.length} ${t("systemPrinters").toLowerCase()}` : t("noSystemPrinters")}</small></span></div>
+          <button type="button" className="button ghost" disabled={loadingPrinters} onClick={loadPrinters}><RefreshCw />{t("refreshPrinters")}</button>
+        </div>
         <div className="print-studio-grid">
           <div className="print-controls">
             {tab === "receipt" ? <PrinterSelect label={t("receiptPrinter")} value={draft.printerName || ""} onChange={(value) => change("printerName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} /> : <PrinterSelect label={t("labelPrinter")} value={draft.labelPrinterName || ""} onChange={(value) => change("labelPrinterName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} />}
             {tab === "receipt" ? (
               <>
+                <label className="print-paper-control">{t("paperWidth")}<select value={draft.receiptPaperWidth} onChange={(event) => changeReceipt("receiptPaperWidth", event.target.value)}><option value="58">58 mm</option><option value="80">80 mm</option></select></label>
                 <div className="receipt-control-group">
                   <div className="receipt-control-heading"><strong>{t("receiptPreset")}</strong><small>{t("receiptPresetHelp")}</small></div>
                   <div className="receipt-presets" role="group" aria-label={t("receiptPreset")}>
@@ -589,31 +608,33 @@ export function SettingsScreen({
                     ))}
                   </div>
                 </div>
-                <div className="receipt-control-group">
-                  <div className="receipt-control-heading"><strong>{t("receiptLayout")}</strong><small>{t("receiptLayoutHelp")}</small></div>
+                <details className="receipt-control-group receipt-advanced">
+                  <summary><span><strong>{t("receiptLayout")}</strong><small>{t("receiptLayoutHelp")}</small></span></summary>
                   <div className="two-fields">
-                    <label>{t("paperWidth")}<select value={draft.receiptPaperWidth} onChange={(event) => changeReceipt("receiptPaperWidth", event.target.value)}><option value="58">58 mm</option><option value="80">80 mm</option></select></label>
                     <label>{t("receiptDensity")}<select value={draft.receiptDensity} onChange={(event) => changeReceipt("receiptDensity", event.target.value)}><option value="compact">{t("compact")}</option><option value="standard">{t("standard")}</option><option value="comfortable">{t("comfortable")}</option></select></label>
                     <label>{t("receiptTextSize")}<select value={draft.receiptTextSize} onChange={(event) => changeReceipt("receiptTextSize", event.target.value)}><option value="small">{t("small")}</option><option value="standard">{t("standard")}</option><option value="large">{t("large")}</option></select></label>
                     <label>{t("receiptMargin")}<select value={draft.receiptMargin} onChange={(event) => changeReceipt("receiptMargin", event.target.value)}><option value="small">{t("small")}</option><option value="standard">{t("standard")}</option><option value="large">{t("large")}</option></select></label>
                     <label>{t("receiptLogoSize")}<select value={draft.receiptLogoSize} onChange={(event) => changeReceipt("receiptLogoSize", event.target.value)}><option value="small">{t("small")}</option><option value="medium">{t("medium")}</option><option value="large">{t("large")}</option></select></label>
                   </div>
-                </div>
-                <div className="receipt-control-group">
-                  <div className="receipt-control-heading"><strong>{t("invoiceCode")}</strong><small>{t("invoiceCodeHelp")}</small></div>
+                </details>
+                <details className="receipt-control-group receipt-advanced">
+                  <summary><span><strong>{t("invoiceCode")}</strong><small>{t("invoiceCodeHelp")}</small></span></summary>
                   <div className="two-fields">
                     <label>{t("codeType")}<select value={draft.receiptCodeType} onChange={(event) => changeReceipt("receiptCodeType", event.target.value)}><option value="none">{t("noCode")}</option><option value="qr">{t("qrCode")}</option><option value="barcode">{t("barcode")}</option><option value="both">{t("qrAndBarcode")}</option></select></label>
                     <label>{t("codePosition")}<select disabled={draft.receiptCodeType === "none"} value={draft.receiptCodePosition} onChange={(event) => changeReceipt("receiptCodePosition", event.target.value)}><option value="header">{t("belowHeader")}</option><option value="beforeTotals">{t("beforeTotals")}</option><option value="footer">{t("afterTotals")}</option></select></label>
                     <label>{t("codeAlignment")}<select disabled={draft.receiptCodeType === "none"} value={draft.receiptCodeAlignment} onChange={(event) => changeReceipt("receiptCodeAlignment", event.target.value)}><option value="start">{t("alignStart")}</option><option value="center">{t("alignCenter")}</option><option value="end">{t("alignEnd")}</option></select></label>
                   </div>
-                </div>
-                <label>{t("receiptHeader")}<textarea value={draft.receiptHeader || ""} onChange={(event) => change("receiptHeader", event.target.value)} /></label>
-                <label>{t("receiptFooter")}<textarea value={draft.receiptFooter || ""} onChange={(event) => change("receiptFooter", event.target.value)} /></label>
-                <Toggle label={t("showLogo")} value={draft.receiptShowLogo} onChange={(value) => changeReceipt("receiptShowLogo", value)} />
-                <Toggle label={t("showCustomer")} value={draft.receiptShowCustomer} onChange={(value) => changeReceipt("receiptShowCustomer", value)} />
-                <Toggle label={t("showNote")} value={draft.receiptShowNote} onChange={(value) => changeReceipt("receiptShowNote", value)} />
-                <Toggle label={t("showSku")} value={draft.receiptShowSku} onChange={(value) => changeReceipt("receiptShowSku", value)} />
-                <Toggle label={t("showTenderedChange")} value={draft.receiptShowTendered} onChange={(value) => changeReceipt("receiptShowTendered", value)} />
+                </details>
+                <details className="receipt-control-group receipt-advanced">
+                  <summary><span><strong>{t("receiptContent")}</strong><small>{t("receiptContentHelp")}</small></span></summary>
+                  <label>{t("receiptHeader")}<textarea value={draft.receiptHeader || ""} onChange={(event) => change("receiptHeader", event.target.value)} /></label>
+                  <label>{t("receiptFooter")}<textarea value={draft.receiptFooter || ""} onChange={(event) => change("receiptFooter", event.target.value)} /></label>
+                  <Toggle label={t("showLogo")} value={draft.receiptShowLogo} onChange={(value) => changeReceipt("receiptShowLogo", value)} />
+                  <Toggle label={t("showCustomer")} value={draft.receiptShowCustomer} onChange={(value) => changeReceipt("receiptShowCustomer", value)} />
+                  <Toggle label={t("showNote")} value={draft.receiptShowNote} onChange={(value) => changeReceipt("receiptShowNote", value)} />
+                  <Toggle label={t("showSku")} value={draft.receiptShowSku} onChange={(value) => changeReceipt("receiptShowSku", value)} />
+                  <Toggle label={t("showTenderedChange")} value={draft.receiptShowTendered} onChange={(value) => changeReceipt("receiptShowTendered", value)} />
+                </details>
               </>
             ) : (
               <>
@@ -627,12 +648,12 @@ export function SettingsScreen({
                 <Toggle label={t("showBarcode")} value={draft.labelShowBarcode} onChange={(value) => change("labelShowBarcode", value)} />
               </>
             )}
-            <button type="button" className="button secondary full" disabled={printing || previewLoading} onClick={() => void testPrint()}>{printing ? <LoaderCircle className="spin" /> : <Printer />}{printing ? t("printing") : t("testPrint")}</button>
+            <button type="button" className="button secondary full" disabled={printing || previewLoading || loadingPrinters} onClick={() => void testPrint()}>{printing ? <LoaderCircle className="spin" /> : <Printer />}{printing ? t("printing") : t("testPrint")}</button>
           </div>
           <div className="print-preview-panel">
-            <div className="print-preview-toolbar"><span><i />{t("livePreview")}</span><small>{tab === "receipt" ? `${draft.receiptPaperWidth} mm` : `${draft.labelWidth} × ${draft.labelHeight} mm`}</small></div>
+            <div className="print-preview-toolbar"><span><i />{t("livePreview")}{previewLoading && previewForTab === tab ? <small>{t("updatingPreview")}</small> : null}</span><small>{tab === "receipt" ? `${draft.receiptPaperWidth} mm` : `${draft.labelWidth} × ${draft.labelHeight} mm`}</small></div>
             <div className={`print-preview-canvas ${tab}`}>
-              {previewLoading ? <LoadingState label={t("updatingPreview")} compact /> : <iframe key={`${tab}-${previewRevision}`} title={t("livePreview")} srcDoc={previewHtml} sandbox="" style={{ width: tab === "receipt" ? `${draft.receiptPaperWidth}mm` : `${draft.labelWidth}mm`, height: tab === "receipt" ? "520px" : `${draft.labelHeight}mm` }} />}
+              {previewForTab !== tab ? <LoadingState label={t("updatingPreview")} compact /> : <iframe title={t("livePreview")} srcDoc={previewHtml} sandbox="" style={{ width: tab === "receipt" ? `${draft.receiptPaperWidth}mm` : `${draft.labelWidth}mm`, height: tab === "receipt" ? "400px" : `${draft.labelHeight}mm` }} />}
             </div>
           </div>
         </div>

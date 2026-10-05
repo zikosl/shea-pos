@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowRight, Check, History, KeyRound, LoaderCircle, Pencil, Plus, ShieldCheck, UserRound, UsersRound, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChartNoAxesCombined, Check, History, KeyRound, LoaderCircle, Pencil, Plus, ShieldCheck, UserRound, UsersRound, X } from "lucide-react";
 import type { LocalRole, Permission } from "../../../electron/contracts";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader } from "../../components/PageHeader";
 import { localeFor, localizeError, localizeValue, useI18n } from "../../i18n";
+import { WorkerActivity } from "./WorkerActivity";
 
 const roles: LocalRole[] = ["OWNER", "MANAGER", "CASHIER", "STOCK_CLERK", "CUSTOM"];
 type Draft = { name: string; username: string; secret: string; active: boolean };
 
-export function TeamScreen({ onNotice }: { onNotice: (message: string) => void }) {
+export function TeamScreen({ onNotice, canViewInvoices }: { onNotice: (message: string) => void; canViewInvoices: boolean }) {
   const { t, language } = useI18n();
-  const [tab, setTab] = useState<"users" | "audit">("users");
+  const [tab, setTab] = useState<"users" | "activity" | "audit">("users");
   const [users, setUsers] = useState<any[]>([]);
   const [audit, setAudit] = useState<any[]>([]);
   const [model, setModel] = useState<{ permissions: Permission[]; rolePermissions: Record<LocalRole, Permission[]> } | null>(null);
@@ -82,13 +83,13 @@ export function TeamScreen({ onNotice }: { onNotice: (message: string) => void }
 
   return <div className="page-stack team-page">
     <PageHeader eyebrow={t("security")} title={t("teamAccess")} description={t("teamAccessText")} actions={tab === "users" ? <button className="button primary" onClick={() => openEditor("new")}><Plus />{t("addUser")}</button> : undefined} />
-    <div className="segmented team-tabs"><button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><UsersRound />{t("users")}</button><button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}><History />{t("auditLog")}</button></div>
+    <div className="segmented team-tabs"><button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><UsersRound />{t("users")}</button><button className={tab === "activity" ? "active" : ""} onClick={() => setTab("activity")}><ChartNoAxesCombined />{t("workerActivity")}</button><button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}><History />{t("auditLog")}</button></div>
     {loading ? <LoadingState label={t("loadingData")} /> : error ? <ErrorState title={t("unableToLoad")} text={error} retryLabel={t("retry")} onRetry={() => void load()} /> : tab === "users" ? (
       users.length ? <div className="team-grid">{users.map((user) => <article className={`panel user-card ${user.active ? "" : "disabled"}`} key={user.id}>
         <div className="user-avatar"><UserRound /></div><div className="user-card-copy"><div><h3>{user.name}</h3><em className="badge">{localizeValue(language, user.role)}</em></div><p>@{user.username}</p><small>{user.permissions.length} {t("permissions")} · {user.lastLoginAt ? `${t("lastLogin")} ${new Date(user.lastLoginAt).toLocaleString(localeFor(language))}` : t("neverLoggedIn")}</small></div>
         <div className="user-card-actions"><button className="icon-button" title={t("resetAccessCode")} onClick={() => setResetting(user)}><KeyRound /></button><button className="icon-button" title={t("edit")} onClick={() => openEditor(user)}><Pencil /></button></div>
       </article>)}</div> : <EmptyState icon={UsersRound} title={t("noUsers")} text={t("noUsersText")} />
-    ) : audit.length ? <div className="panel table-panel"><div className="table"><div className="table-row audit-row table-head"><span>{t("date")}</span><span>{t("user")}</span><span>{t("action")}</span><span>{t("target")}</span></div>{audit.map((row) => <div className="table-row audit-row" key={row.id}><span>{new Date(row.created_at).toLocaleString(localeFor(language))}</span><span><strong>{row.user_name}</strong></span><span>{localizeValue(language, row.action)}</span><span>{row.entity_type ? `${row.entity_type}${row.entity_id ? ` · ${row.entity_id}` : ""}` : "-"}</span></div>)}</div></div> : <EmptyState icon={History} title={t("noAuditEvents")} text={t("noAuditEventsText")} />}
+    ) : tab === "activity" ? <WorkerActivity users={users} canViewInvoices={canViewInvoices} /> : audit.length ? <div className="panel table-panel"><div className="table"><div className="table-row audit-row table-head"><span>{t("date")}</span><span>{t("user")}</span><span>{t("action")}</span><span>{t("target")}</span></div>{audit.map((row) => <div className="table-row audit-row" key={row.id}><span>{new Date(row.created_at).toLocaleString(localeFor(language))}</span><span><strong>{row.user_name}</strong></span><span>{localizeValue(language, row.action)}</span><span>{row.entity_type ? `${row.entity_type}${row.entity_id ? ` · ${row.entity_id}` : ""}` : "-"}</span></div>)}</div></div> : <EmptyState icon={History} title={t("noAuditEvents")} text={t("noAuditEventsText")} />}
 
     {editing && model ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !saving && setEditing(null)}><div className="modal-card user-editor">
       <div className="receipt-preview-heading"><div><p className="eyebrow">{t("stepOf").replace("{current}", String(step)).replace("{total}", "2")}</p><h2>{editing === "new" ? t("addUser") : t("editUser")}</h2></div><button type="button" className="icon-button" onClick={() => setEditing(null)}><X /></button></div>

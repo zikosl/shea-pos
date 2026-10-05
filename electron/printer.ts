@@ -99,9 +99,12 @@ export function receiptHtml(sale: any, items: any[], settings: PrintSettings) {
   const meta = `<div class="meta"><strong>${escape(sale.sale_number)}</strong><span>${escape(new Date(sale.created_at).toLocaleString(language === "ar" ? "ar-DZ" : "en-DZ"))}</span></div>`;
   const details = `${revision > 1 ? `<div class="corrected">${text.corrected} · ${revision}</div>` : ""}${enabled(settings, "receiptShowCustomer", true) && sale.customer_name ? `<div class="customer">${text.customer}: ${escape(sale.customer_name)}</div>` : ""}${enabled(settings, "receiptShowNote", true) && sale.note ? `<div class="customer">${text.note}: ${escape(sale.note)}</div>` : ""}`;
   const refunded = Number(sale.refunded_total ?? 0);
-  const totals = `<div class="totals"><div class="row"><span>${text.subtotal}</span><span>${money(sale.subtotal)}</span></div>${Number(sale.discount_total) ? `<div class="row"><span>${text.discount}</span><span>-${money(sale.discount_total)}</span></div>` : ""}${Number(sale.tax_total) ? `<div class="row"><span>${text.tax}</span><span>${money(sale.tax_total)}</span></div>` : ""}<div class="row grand"><strong>${text.total}</strong><strong>${money(sale.total)}</strong></div>${refunded ? `<div class="row"><span>${text.refunded}</span><span>-${money(refunded)}</span></div><div class="row grand"><strong>${text.netPaid}</strong><strong>${money(Math.max(0, Number(sale.total) - refunded))}</strong></div>` : ""}<div class="row"><span>${text.payment}</span><span>${escape(payment)}</span></div>${enabled(settings, "receiptShowTendered", true) ? `<div class="row"><span>${text.tendered}</span><span>${money(sale.amount_tendered)}</span></div><div class="row"><span>${text.change}</span><span>${money(sale.change_due)}</span></div>` : ""}</div>`;
+  const totalRow = refunded
+    ? `<div class="row"><span>${text.total}</span><span>${money(sale.total)}</span></div><div class="row"><span>${text.refunded}</span><span>-${money(refunded)}</span></div><div class="row grand"><strong>${text.netPaid}</strong><strong>${money(Math.max(0, Number(sale.total) - refunded))}</strong></div>`
+    : `<div class="row grand"><strong>${text.total}</strong><strong>${money(sale.total)}</strong></div>`;
+  const totals = `<div class="totals"><div class="row"><span>${text.subtotal}</span><span>${money(sale.subtotal)}</span></div>${Number(sale.discount_total) ? `<div class="row"><span>${text.discount}</span><span>-${money(sale.discount_total)}</span></div>` : ""}${Number(sale.tax_total) ? `<div class="row"><span>${text.tax}</span><span>${money(sale.tax_total)}</span></div>` : ""}${totalRow}<div class="row"><span>${text.payment}</span><span>${escape(payment)}</span></div>${enabled(settings, "receiptShowTendered", true) ? `<div class="row"><span>${text.tendered}</span><span>${money(sale.amount_tendered)}</span></div><div class="row"><span>${text.change}</span><span>${money(sale.change_due)}</span></div>` : ""}</div>`;
   const body = `<main class="receipt"><header>${enabled(settings, "receiptShowLogo", true) && logo ? `<img src="${escape(logo)}" alt="">` : ""}<h1>${escape(settings.storeName || "Shea POS")}</h1>${settings.receiptHeader ? `<p>${escape(settings.receiptHeader)}</p>` : ""}</header>${meta}${codePosition === "header" ? codeBlock : ""}${details}<div class="rule"></div>${lines}<div class="rule"></div>${codePosition === "beforeTotals" ? codeBlock : ""}${totals}${codePosition === "footer" ? codeBlock : ""}<footer>${escape(footer)}</footer></main>`;
-  return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;min-height:90mm;padding:${pageMargin}mm;font-size:${fontSize}px}.receipt header{text-align:center;margin-bottom:${ruleGap}mm}.receipt header img{display:block;max-width:${logoWidth}mm;max-height:${logoHeight}mm;object-fit:contain;margin:0 auto 2mm}.receipt h1{font-size:${fontSize + 7}px;margin:0}.receipt header p,.meta span{margin:1mm 0;color:#444;font-size:${Math.max(8, fontSize - 2)}px;white-space:pre-line}.meta{display:flex;justify-content:space-between;gap:3mm;font-size:${Math.max(8, fontSize - 2)}px;direction:${language === "ar" ? "rtl" : "ltr"}}.customer{margin-top:2mm}.corrected{margin:2mm 0;padding:1.5mm;border:1px solid #111;text-align:center;font-size:${Math.max(8, fontSize - 2)}px;font-weight:700}.rule{border-top:1px dashed #111;margin:${ruleGap}mm 0}.item{margin:${itemGap}mm 0}.item-name{display:flex;flex-direction:column}.item small{font-size:${Math.max(7, fontSize - 3)}px;color:#444}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:3mm}.totals .row{margin:${density === "compact" ? 0.8 : density === "comfortable" ? 1.6 : 1.2}mm 0}.grand{padding-top:2mm;margin-top:2mm!important;border-top:1px solid #111;font-size:${fontSize + 4}px}.invoice-codes{margin-top:${ruleGap}mm;padding-top:${Math.max(1.5, ruleGap - 0.5)}mm;border-top:1px dashed #111;text-align:${codeTextAlign};direction:ltr}.code-assets{display:flex;flex-direction:${stackCodes ? "column" : "row"};align-items:${codeJustify};justify-content:${codeJustify};gap:2mm}.invoice-codes .qr svg{display:block;width:18mm;height:18mm}.invoice-codes .barcode{width:${Math.max(28, width - (pageMargin * 2) - 5)}mm;max-width:100%}.invoice-codes .barcode svg{display:block;width:100%;max-height:17mm}.invoice-codes small{display:block;margin-top:1.5mm;color:#444;font-size:${Math.max(7, fontSize - 3)}px}.receipt footer{text-align:center;white-space:pre-line;margin-top:${ruleGap + 1}mm;font-size:${Math.max(8, fontSize - 2)}px}`);
+  return documentHtml(body, language, `@page{size:${width}mm auto;margin:0}.receipt{width:${width}mm;padding:${pageMargin}mm;font-size:${fontSize}px}.receipt header{text-align:center;margin-bottom:${ruleGap}mm}.receipt header img{display:block;max-width:${logoWidth}mm;max-height:${logoHeight}mm;object-fit:contain;margin:0 auto 2mm}.receipt h1{font-size:${fontSize + 7}px;margin:0}.receipt header p,.meta span{margin:1mm 0;color:#444;font-size:${Math.max(8, fontSize - 2)}px;white-space:pre-line}.meta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:1mm 3mm;font-size:${Math.max(8, fontSize - 2)}px;direction:${language === "ar" ? "rtl" : "ltr"};overflow-wrap:anywhere}.customer{margin-top:2mm}.corrected{margin:2mm 0;padding:1.5mm;border:1px solid #111;text-align:center;font-size:${Math.max(8, fontSize - 2)}px;font-weight:700}.rule{border-top:1px dashed #111;margin:${ruleGap}mm 0}.item{margin:${itemGap}mm 0}.item+.item{border-top:1px dashed #777;padding-top:${itemGap}mm}.item-name{display:flex;flex-direction:column;overflow-wrap:anywhere}.item small{font-size:${Math.max(7, fontSize - 3)}px;color:#444}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:3mm}.totals .row{margin:${density === "compact" ? 0.8 : density === "comfortable" ? 1.6 : 1.2}mm 0}.totals .grand{align-items:center;border:1px solid #111;padding:1.5mm 2mm;margin:2mm 0 2.4mm!important;font-size:${fontSize + (width < 70 ? 2 : 4)}px;break-inside:avoid}.totals .grand strong:last-child{direction:ltr;white-space:nowrap;font-variant-numeric:tabular-nums}.invoice-codes{margin-top:${ruleGap}mm;padding-top:${Math.max(1.5, ruleGap - 0.5)}mm;border-top:1px dashed #111;text-align:${codeTextAlign};direction:ltr;break-inside:avoid}.code-assets{display:flex;flex-direction:${stackCodes ? "column" : "row"};align-items:${codeJustify};justify-content:${codeJustify};gap:2mm}.invoice-codes .qr svg{display:block;width:18mm;height:18mm}.invoice-codes .barcode{width:${Math.max(28, width - (pageMargin * 2) - 5)}mm;max-width:100%}.invoice-codes .barcode svg{display:block;width:100%;max-height:17mm}.invoice-codes small{display:block;margin-top:1.5mm;color:#444;font-size:${Math.max(7, fontSize - 3)}px}.receipt footer{text-align:center;white-space:pre-line;margin-top:${ruleGap + 1}mm;font-size:${Math.max(8, fontSize - 2)}px}`);
 }
 
 function deliveryReceipt(database: PosDatabase, id: string) {
@@ -194,6 +197,16 @@ export async function listPrinters(window: BrowserWindow) {
   return window.webContents.getPrintersAsync();
 }
 
+export function printOptions(printerName?: string, pageSize?: { width: number; height: number }): Electron.WebContentsPrintOptions {
+  return {
+    silent: true,
+    printBackground: true,
+    deviceName: printerName || undefined,
+    margins: { marginType: "none" as const },
+    ...(pageSize ? { pageSize } : { usePrinterDefaultPageSize: true }),
+  };
+}
+
 async function printHtml(html: string, printerName?: string, pageSize?: { width: number; height: number }) {
   const printWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
   try {
@@ -201,7 +214,7 @@ async function printHtml(html: string, printerName?: string, pageSize?: { width:
     const printers = await printWindow.webContents.getPrintersAsync();
     if (!printers.length) throw new Error("NO_SYSTEM_PRINTERS");
     if (printerName && !printers.some((printer) => printer.name === printerName)) throw new Error("PRINTER_NOT_FOUND");
-    await new Promise<void>((resolve, reject) => printWindow.webContents.print({ silent: true, printBackground: true, deviceName: printerName || undefined, margins: { marginType: "none" }, ...(pageSize ? { pageSize } : {}) }, (success, reason) => success ? resolve() : reject(new Error(reason || "Printing failed"))));
+    await new Promise<void>((resolve, reject) => printWindow.webContents.print(printOptions(printerName, pageSize), (success, reason) => success ? resolve() : reject(new Error(reason || "Printing failed"))));
   } finally {
     printWindow.destroy();
   }
@@ -241,14 +254,14 @@ export async function printPriceLabels(database: PosDatabase, items: Array<{ pro
 }
 
 export async function testPrinter(database: PosDatabase, printerName?: string, draft: PrintSettings = {}) {
-  await printHtml(previewReceipt(database, undefined, draft), printerName || draft.printerName || database.getSetting("printerName") || undefined);
+  await printHtml(previewReceipt(database, undefined, draft), printerName ?? draft.printerName ?? database.getSetting("printerName") ?? undefined);
 }
 
 export async function testPriceLabel(database: PosDatabase, printerName?: string, draft: PrintSettings = {}) {
   const settings = { ...database.getSettings(), ...draft };
   const width = numberSetting(settings, "labelWidth", 50, 25, 100);
   const height = numberSetting(settings, "labelHeight", 30, 15, 100);
-  await printHtml(priceLabelHtml([{ product: sampleProduct(), copies: 1 }], settings), printerName || settings.labelPrinterName || undefined, {
+  await printHtml(priceLabelHtml([{ product: sampleProduct(), copies: 1 }], settings), printerName ?? settings.labelPrinterName ?? undefined, {
     width: Math.round(width * 1000),
     height: Math.round(height * 1000),
   });

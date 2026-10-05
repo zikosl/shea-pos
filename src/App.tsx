@@ -585,7 +585,7 @@ export default function App() {
             {page === "requests" && (
               <CatalogRequestsScreen onNotice={setNotice} />
             )}
-            {page === "team" && <TeamScreen onNotice={setNotice} />}
+            {page === "team" && <TeamScreen onNotice={setNotice} canViewInvoices={can("INVOICES_VIEW")} />}
             {page === "settings" && (
               <SettingsScreen
                 values={settings}

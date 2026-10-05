@@ -193,6 +193,8 @@ export type PosApi = {
   updateLocalUser(input: { id: string; name: string; username: string; role: LocalRole; permissions?: Permission[]; active: boolean }): Promise<unknown>;
   resetLocalUserSecret(input: { id: string; secret: string }): Promise<void>;
   listAuditLogs(): Promise<unknown[]>;
+  workerActivity(input: { operatorId?: string; from?: string; to?: string }): Promise<unknown>;
+  orderActivity(input: { orderType: "ONLINE" | "GIFT"; orderId: string }): Promise<unknown[]>;
   sync(options?: { forceRetry?: boolean }): Promise<unknown>;
   listProducts(input?: {
     search?: string;

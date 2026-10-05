@@ -213,6 +213,7 @@ const printPreviewSchema = z
   .object({
     saleId: z.string().min(1).optional(),
     productLocalId: z.string().min(1).optional(),
+    printerName: z.string().optional(),
     settings: z.record(z.string(), z.string().max(3_000_000)).optional(),
   })
   .optional();
@@ -523,40 +524,48 @@ export function registerIpc(
     database.overview(reportSchema.parse(raw)),
   { permission: "REPORTS_VIEW" });
   handle("pos:list-sales", () => database.listSales(), { permission: "INVOICES_VIEW" });
+  handle("pos:worker-activity", (raw) => database.workerActivity(z.object({
+    operatorId: z.string().uuid().optional(), from: z.iso.datetime().optional(), to: z.iso.datetime().optional(),
+  }).parse(raw)), { permission: "USERS_MANAGE" });
+  handle("pos:order-activity", (raw) => {
+    const input = z.object({ orderType: z.enum(["ONLINE", "GIFT"]), orderId: z.string().min(1) }).parse(raw);
+    access.require(input.orderType === "ONLINE" ? "ORDERS_VIEW" : "CUSTOM_ORDERS_VIEW");
+    return database.orderActivity(input.orderType, input.orderId);
+  }, { permission: ["ORDERS_VIEW", "CUSTOM_ORDERS_VIEW"] });
   handle("pos:list-orders", () => database.listOrders(), { permission: "ORDERS_VIEW" });
   handle("pos:transition-online-order", (raw) => {
     sync.assertCanTransact();
     const input = onlineOrderTransitionSchema.parse(raw);
-    return database.queueOnlineOrderCommand(input.id, "TRANSITION_ONLINE_ORDER", input.status, input);
+    return database.queueOnlineOrderCommand(input.id, "TRANSITION_ONLINE_ORDER", input.status, input, access.require("ORDERS_VIEW"));
   }, { permission: "ORDERS_VIEW", audit: true });
   handle("pos:create-online-order-quotation", (raw) => {
     sync.assertCanTransact();
     const input = onlineOrderQuotationSchema.parse(raw);
-    return database.queueOnlineOrderCommand(input.id, "CREATE_ONLINE_ORDER_QUOTATION", "AWAITING_CLIENT_APPROVAL", input);
+    return database.queueOnlineOrderCommand(input.id, "CREATE_ONLINE_ORDER_QUOTATION", "AWAITING_CLIENT_APPROVAL", input, access.require("ORDERS_VIEW"));
   }, { permission: "ORDERS_VIEW", audit: true });
   handle("pos:list-gift-orders", () => { requireCapability("CUSTOM_ORDERS"); return database.listGiftOrders(); }, { permission: "CUSTOM_ORDERS_VIEW" });
   handle("pos:create-custom-order", (raw) => {
     requireCapability("GIFT_BUILDER");
     sync.assertCanTransact();
-    return database.createCustomOrder(customOrderSchema.parse(raw));
+    return database.createCustomOrder(customOrderSchema.parse(raw), access.require("CUSTOM_ORDERS_MANAGE"));
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:transition-custom-order", (raw) => {
     requireCapability("CUSTOM_ORDERS");
     sync.assertCanTransact();
     const input = customOrderTransitionSchema.parse(raw);
-    return database.transitionCustomOrder(input.id, input.status);
+    return database.transitionCustomOrder(input.id, input.status, access.require("CUSTOM_ORDERS_MANAGE"));
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:create-custom-order-quotation", (raw) => {
     requireCapability("QUOTATIONS");
     sync.assertCanTransact();
     const input = customOrderQuotationSchema.parse(raw);
-    return database.queueCustomOrderCommand(input.id, "CREATE_CUSTOM_ORDER_QUOTATION", "AWAITING_CUSTOMER_APPROVAL", input);
+    return database.queueCustomOrderCommand(input.id, "CREATE_CUSTOM_ORDER_QUOTATION", "AWAITING_CUSTOMER_APPROVAL", input, access.require("CUSTOM_ORDERS_MANAGE"));
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:reserve-custom-order-materials", (raw) => {
     requireCapability("PRODUCTION");
     sync.assertCanTransact();
     const { id } = z.object({ id: z.string().min(1) }).parse(raw);
-    return database.queueCustomOrderCommand(id, "RESERVE_CUSTOM_ORDER_MATERIALS", "MATERIALS_RESERVED");
+    return database.queueCustomOrderCommand(id, "RESERVE_CUSTOM_ORDER_MATERIALS", "MATERIALS_RESERVED", {}, access.require("CUSTOM_ORDERS_MANAGE"));
   }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
   handle("pos:list-invoices", () => database.listInvoices(), { permission: "INVOICES_VIEW" });
   handle("pos:lookup-invoice", (raw) => database.lookupInvoice(invoiceLookupSchema.parse(raw).reference), { permission: "INVOICES_VIEW" });
@@ -630,15 +639,20 @@ export function registerIpc(
     sync.assertCanTransact();
     const user = access.require("POS_SELL");
     const input = { ...checkoutSchema.parse(raw), operatorId: user.id, operatorName: user.name };
-    if (!gateway.enabled()) return database.checkout(input);
+    const recordSale = (sale: any) => {
+      access.audit("SALE_COMPLETED", "Sale", sale.id, { saleNumber: sale.sale_number, total: sale.total });
+      return sale;
+    };
+    if (!gateway.enabled()) return recordSale(database.checkout(input));
     const transactionId = randomUUID();
     const device = JSON.parse(database.getSetting("device") ?? "{}") as { id?: string };
     const saleNumber = `POS-${device.id?.slice(0, 6) ?? "LOCAL"}-${Date.now()}`;
     await gateway.createSale(input, transactionId, saleNumber);
     const sale = database.checkout({ ...input, transactionId, saleNumber, gatewayCommitted: true });
+    recordSale(sale);
     await gateway.refreshProducts();
     return sale;
-  }, { permission: "POS_SELL", audit: true });
+  }, { permission: "POS_SELL" });
   handle("pos:get-cash-session", () => database.getCashSession(), { permission: ["POS_SELL", "REGISTER_MANAGE"] });
   handle("pos:list-cash-sessions", () => database.listCashSessions(), { permission: "REGISTER_MANAGE" });
   handle("pos:open-cash-session", (raw) => {
@@ -728,13 +742,13 @@ export function registerIpc(
   }, { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:test-printer", (raw) => {
     const input = printPreviewSchema.parse(raw);
-    return testPrinter(database, input?.settings?.printerName, input?.settings);
+    return testPrinter(database, input?.printerName ?? input?.settings?.printerName, input?.settings);
   }, { permission: "SETTINGS_MANAGE", audit: true });
   handle("pos:test-price-label", (raw) => {
     const input = printPreviewSchema.parse(raw);
     return testPriceLabel(
       database,
-      input?.settings?.labelPrinterName,
+      input?.printerName ?? input?.settings?.labelPrinterName,
       input?.settings,
     );
   }, { permission: "SETTINGS_MANAGE", audit: true });

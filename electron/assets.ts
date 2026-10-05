@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { PosDatabase } from "./database";
+import { resolveProductImageUrl } from "./image-url";
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -139,11 +140,7 @@ export class ProductAssetService {
       const remoteUrl = this.absoluteRemoteUrl(row.remote_image_url);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15_000);
-      const response = await fetch(remoteUrl, {
-        signal: controller.signal,
-        redirect: "follow",
-        headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/gif" },
-      }).finally(() => clearTimeout(timeout));
+      const response = await this.fetchImage(remoteUrl, controller.signal).finally(() => clearTimeout(timeout));
       if (!response.ok) throw new Error(`Image download failed (${response.status})`);
       const type = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
       const extension = MIME_EXTENSIONS[type];
@@ -174,13 +171,26 @@ export class ProductAssetService {
 
   private absoluteRemoteUrl(value: string) {
     const base = this.database.getSetting("assetBase") ?? "";
-    if (!base) throw new Error("The backend asset origin is not configured");
-    const url = new URL(value, base || undefined);
-    if (!['http:', 'https:'].includes(url.protocol)) throw new Error("Unsafe product image URL");
-    const backend = new URL(base);
-    if (url.origin !== backend.origin) throw new Error("Product image must use the configured Shea backend");
-    if (!url.pathname.startsWith("/uploads/") && !url.pathname.startsWith("/api/uploads/"))
-      throw new Error(`Invalid product image path: expected /uploads/... or /api/uploads/..., received ${url.pathname}`);
-    return url.toString();
+    const url = resolveProductImageUrl(value, base);
+    if (!url) throw new Error("Product image URL is not a permitted public HTTPS source");
+    return url;
+  }
+
+  private async fetchImage(initialUrl: URL, signal: AbortSignal) {
+    const assetBase = this.database.getSetting("assetBase") ?? "";
+    let url = initialUrl;
+    for (let redirectCount = 0; redirectCount < 4; redirectCount += 1) {
+      const response = await fetch(url, {
+        signal,
+        redirect: "manual",
+        headers: { Accept: "image/avif,image/webp,image/png,image/jpeg,image/gif" },
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+      const destination = response.headers.get("location");
+      const next = destination ? resolveProductImageUrl(new URL(destination, url).toString(), assetBase) : null;
+      if (!next) throw new Error("Product image redirect is not a permitted public HTTPS source");
+      url = next;
+    }
+    throw new Error("Product image redirected too many times");
   }
 }

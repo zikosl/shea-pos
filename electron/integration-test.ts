@@ -6,13 +6,18 @@ import { PosDatabase } from "./database";
 import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
 import {
+  printOptions,
   previewInvoice,
   previewPriceLabel,
   previewReceipt,
   previewStockEntry,
+  receiptHtml,
 } from "./printer";
 
 async function main() {
+    assert.equal(printOptions().usePrinterDefaultPageSize, true);
+    assert.equal(printOptions("Receipt printer").deviceName, "Receipt printer");
+    assert.deepEqual(printOptions("Label printer", { width: 50_000, height: 30_000 }).pageSize, { width: 50_000, height: 30_000 });
     const root = mkdtempSync(path.join(os.tmpdir(), "shea-pos-test-"));
     const database = new PosDatabase(root);
     try {
@@ -86,6 +91,8 @@ async function main() {
 
       const sale = database.checkout({
         paymentMethod: "CASH",
+        operatorId: "test-manager",
+        operatorName: "Test manager",
         lines: [
           { productLocalId: "tracked", quantity: 2 },
           { productLocalId: "unlimited", quantity: 3 },
@@ -291,6 +298,12 @@ async function main() {
       assert.match(correctedReceipt, /POS-/);
       assert.match(correctedReceipt, /<section class="invoice-codes">/);
       assert.match(correctedReceipt, /Corrected invoice|فاتورة مصححة/);
+      assert.match(correctedReceipt, /\.totals \.grand\{align-items:center;border:1px solid #111/);
+      assert.doesNotMatch(correctedReceipt, /min-height:90mm/);
+      assert.equal((correctedReceipt.match(/class="row grand"/g) || []).length, 1);
+      const refundedReceipt = receiptHtml({ ...sale, refunded_total: 50 }, [], database.getSettings());
+      assert.equal((refundedReceipt.match(/class="row grand"/g) || []).length, 1);
+      assert.match(refundedReceipt, /Net paid|الصافي المدفوع/);
       const qrReceipt = previewReceipt(database, sale.id, {
         receiptCodeType: "qr",
         receiptCodePosition: "header",
@@ -364,6 +377,9 @@ async function main() {
       database.db.prepare(
         "UPDATE products SET remote_image_url='/uploads/products/serum.webp',image_sync_state='PENDING' WHERE local_id='tracked'",
       ).run();
+      database.setSetting("assetBase", "https://shea.example.com");
+      const remoteFallback = database.listInventory({ search: "Tracked" }).find((row: any) => row.local_id === "tracked") as any;
+      assert.equal(remoteFallback.image, "https://shea.example.com/uploads/products/serum.webp");
       assert.equal(
         database.productImageCandidates().some((row) => row.local_id === "tracked"),
         true,
@@ -374,7 +390,6 @@ async function main() {
       const cachedProduct = database.listInventory({ search: "Tracked" }).find((row: any) => row.local_id === "tracked") as any;
       assert.match(cachedProduct.image, /^data:image\/webp;base64,/);
       assert.equal(cachedProduct.image_checksum, "checksum");
-      database.setSetting("assetBase", "https://shea.example.com");
       database.db.prepare("UPDATE products SET remote_image_url='/api/uploads/products/serum.webp' WHERE local_id='tracked'").run();
       const assets = new ProductAssetService(database, root);
       await assert.rejects(
@@ -387,7 +402,7 @@ async function main() {
         fulfillmentMode: "PICKUP",
         occasion: "Birthday",
         lines: [{ name: "Rose box", quantity: 1, unitPrice: 2_500 }],
-      }) as any;
+      }, { id: "test-manager", name: "Test manager" }) as any;
       assert.equal(customOrder.status, "REQUESTED");
       assert.equal(customOrder.total, 2_500);
       assert.equal(database.listGiftOrders().some((row: any) => row.id === customOrder.id), true);
@@ -400,9 +415,23 @@ async function main() {
         version: 2,
         updatedAt: new Date().toISOString(),
       });
-      const transitioned = database.transitionCustomOrder(customOrder.id, "AWAITING_CUSTOMER_APPROVAL") as any;
+      const transitioned = database.transitionCustomOrder(customOrder.id, "AWAITING_CUSTOMER_APPROVAL", { id: "test-manager", name: "Test manager" }) as any;
       assert.equal(transitioned.status, "AWAITING_CUSTOMER_APPROVAL");
       assert.equal(transitioned.version, 3);
+      const orderHistory = database.orderActivity("GIFT", customOrder.id) as any[];
+      assert.equal(orderHistory.length, 2);
+      assert.equal(orderHistory[0].operator_name, "Test manager");
+      assert.equal(orderHistory[0].sync_state, "PENDING");
+      const transitionOutboxId = (database.db.prepare("SELECT outbox_id FROM order_activity WHERE id=?").get(orderHistory[0].id) as any).outbox_id;
+      database.markOutboxError(transitionOutboxId, "Temporary network failure");
+      assert.equal((database.orderActivity("GIFT", customOrder.id) as any[])[0].sync_state, "ERROR");
+      database.markOutboxSynced(transitionOutboxId);
+      assert.equal((database.orderActivity("GIFT", customOrder.id) as any[])[0].sync_state, "SYNCED");
+      const workerHistory = database.workerActivity({ operatorId: "test-manager" });
+      assert.equal(workerHistory.sales[0].sale_count, 1);
+      assert.equal(workerHistory.refunds[0].refund_count, 1);
+      assert.equal(workerHistory.orders[0].action_count, 2);
+      assert.equal((workerHistory.orderEntries[0] as any).reference, customOrder.order_number);
       const backupPath = await database.createBackup(root);
       assert.equal(existsSync(path.join(backupPath, "shea-pos.sqlite")), true);
       assert.equal(existsSync(path.join(backupPath, "assets", "products", "serum.webp")), true);
