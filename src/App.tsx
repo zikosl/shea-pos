@@ -27,7 +27,7 @@ import { InvoicesScreen, OrdersScreen } from "./features/history/HistoryScreens"
 import { InventoryScreen } from "./features/inventory/InventoryScreen";
 import { StockEntriesScreen } from "./features/inventory/StockEntriesScreen";
 import { BarcodeManagerScreen } from "./features/barcodes/BarcodeManagerScreen";
-import { PosScreen } from "./features/pos/PosScreen";
+import { HOLD_SALE_SHORTCUT_EVENT, PosScreen } from "./features/pos/PosScreen";
 import { SettingsScreen } from "./features/settings/SettingsScreen";
 import { ReportsScreen } from "./features/reports/ReportsScreen";
 import { LocalAccessScreen } from "./features/access/LocalAccessScreen";
@@ -52,6 +52,9 @@ import { DeploymentSetupScreen } from "./features/setup/DeploymentSetupScreen";
 
 type Page =
   "pos" | "stock" | "barcodes" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
+function isSoftRefreshShortcut(event: KeyboardEvent) {
+  return event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r");
+}
 const emptyState: AppState = {
   authenticated: false,
   user: null,
@@ -175,6 +178,10 @@ export default function App() {
     return () => media.removeEventListener("change", applyTheme);
   }, [settings.theme, settings.primaryColor, settings.language]);
   useEffect(() => {
+    // Notices are rendered text, so never carry one over into a new locale.
+    setNotice("");
+  }, [language]);
+  useEffect(() => {
     if (!shortcutsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -186,6 +193,7 @@ export default function App() {
   }, [shortcutsOpen]);
 
   async function sync() {
+    if (busy) return;
     setBusy(true);
     setNotice("");
     try {
@@ -200,6 +208,23 @@ export default function App() {
       setBusy(false);
     }
   }
+  useEffect(() => {
+    return window.pos.onSoftRefresh(() => {
+      if (state.authenticated && state.localAccess.authenticated) void sync();
+    });
+  }, [state.authenticated, state.localAccess.authenticated, busy, language]);
+  useEffect(() => {
+    // This is a browser fallback and also protects against platform menu paths
+    // that do not reach Electron's before-input-event hook.
+    const interceptRefresh = (event: KeyboardEvent) => {
+      if (!isSoftRefreshShortcut(event)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (state.authenticated && state.localAccess.authenticated) void sync();
+    };
+    window.addEventListener("keydown", interceptRefresh, { capture: true });
+    return () => window.removeEventListener("keydown", interceptRefresh, { capture: true });
+  }, [state.authenticated, state.localAccess.authenticated, busy, language]);
 
   async function toggleSidebar() {
     const next = !sidebarCollapsed;
@@ -370,6 +395,20 @@ export default function App() {
       key: "F2",
       allowInField: true,
       run: focusPageSearch,
+    },
+    {
+      id: "soft-refresh",
+      key: "F5",
+      allowInField: true,
+      enabled: state.authenticated && state.localAccess.authenticated,
+      run: () => void sync(),
+    },
+    {
+      id: "hold-sale-f3",
+      key: "F3",
+      allowInField: true,
+      enabled: page === "pos" && can("POS_SELL"),
+      run: () => window.dispatchEvent(new Event(HOLD_SALE_SHORTCUT_EVENT)),
     },
     {
       id: "sync",
@@ -579,9 +618,9 @@ export default function App() {
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen />}
             {page === "sales" && (
-              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} />
+              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} onGoToPos={() => setPage("pos")} />
             )}
-            {page === "reports" && <ReportsScreen onNotice={setNotice} />}
+            {page === "reports" && <ReportsScreen onNotice={setNotice} canViewTeam={can("USERS_MANAGE")} />}
             {page === "requests" && (
               <CatalogRequestsScreen onNotice={setNotice} />
             )}
@@ -660,6 +699,10 @@ export default function App() {
                   rows={[
                     { label: t("focusSearch"), keys: ["Ctrl", "K"] },
                     { label: t("focusSearch"), keys: ["F2"] },
+                    { label: t("refresh"), keys: ["F5"] },
+                    ...(page === "pos" && can("POS_SELL")
+                      ? [{ label: t("holdSale"), keys: ["F3"] }]
+                      : []),
                     ...(can("SYNC_MANAGE")
                       ? [{ label: t("sync"), keys: ["Ctrl", "Shift", "S"] }]
                       : []),

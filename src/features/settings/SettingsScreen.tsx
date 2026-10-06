@@ -202,7 +202,17 @@ export function SettingsScreen({
   function change(key: string, value: string, applyImmediately = false) {
     const next = { ...draft, [key]: value };
     setDraft(next);
-    if (applyImmediately) onChange({ ...values, [key]: value });
+    if (!applyImmediately) return;
+
+    const immediate = { ...values, [key]: value };
+    onChange(immediate);
+    if (key === "language") {
+      // Language is the only immediate setting that affects every message;
+      // persist it now so restarts do not restore a stale locale.
+      void window.pos.updateSettings(immediate)
+        .then(onChange)
+        .catch((error) => onNotice(localizeError(language, error)));
+    }
   }
 
   function changeReceipt(key: string, value: string) {

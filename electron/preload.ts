@@ -11,6 +11,11 @@ const api: PosApi = {
     ipcRenderer.on("pos:update-status", handler);
     return () => ipcRenderer.removeListener("pos:update-status", handler);
   },
+  onSoftRefresh: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("pos:soft-refresh", handler);
+    return () => ipcRenderer.removeListener("pos:soft-refresh", handler);
+  },
   getState: () => ipcRenderer.invoke("pos:get-state"),
   copyText: (value) => ipcRenderer.invoke("pos:copy-text", value),
   getGatewayStatus: () => ipcRenderer.invoke("pos:get-gateway-status"),

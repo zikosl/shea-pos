@@ -11,7 +11,7 @@ const refundRequestSchema = z.object({
   saleId: z.uuid(),
   cashierId: z.string().max(160).nullish(),
   cashierName: z.string().max(160).nullish(),
-  reason: z.string().trim().min(3).max(500),
+  reason: z.string().trim().max(500),
   createdAt: z.iso.datetime(),
   items: z.array(z.object({ productId: z.number().int().positive(), quantity: z.number().positive() })).min(1).max(500),
 });

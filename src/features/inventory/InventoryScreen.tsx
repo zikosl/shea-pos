@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Boxes,
   Check,
-  ChevronLeft,
-  ChevronRight,
   History,
   ImageDown,
   LoaderCircle,
@@ -14,6 +12,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
+import { Pagination } from "../../components/Pagination";
 import { PageHeader } from "../../components/PageHeader";
 import {
   ImagePreview,
@@ -869,18 +868,12 @@ export function InventoryScreen({
         </div>
       )}
       {!loading && !error && (
-        <div className="pagination">
-          <button disabled={!page} onClick={() => setPage(page - 1)}>
-            <ChevronLeft />
-          </button>
-          <span>{page + 1}</span>
-          <button
-            disabled={current.length < limit}
-            onClick={() => setPage(page + 1)}
-          >
-            <ChevronRight />
-          </button>
-        </div>
+        <Pagination
+          page={page}
+          pageSize={limit}
+          total={tab === "products" ? filteredProducts.length : tab === "catalog" ? filteredTemplates.length : movements.length}
+          onPageChange={setPage}
+        />
       )}
       {showCreate && catalog && (
         <div

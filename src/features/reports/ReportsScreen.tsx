@@ -7,6 +7,7 @@ import {
   LoaderCircle,
   PackageCheck,
   ReceiptText,
+  UsersRound,
   WalletCards,
 } from "lucide-react";
 import { localeFor, localizeValue, useI18n } from "../../i18n";
@@ -18,10 +19,36 @@ import { localizeError } from "../../i18n";
 
 type Report = any;
 
+type WorkerActivity = {
+  sales: Array<{
+    operator_id: string | null;
+    operator_name: string | null;
+    sale_count: number;
+    sales_total: number;
+  }>;
+  refunds: Array<{
+    operator_id: string | null;
+    operator_name: string | null;
+    refund_count: number;
+    refunds_total: number;
+  }>;
+};
+
+type WorkerInsight = {
+  id: string;
+  name: string;
+  sales: number;
+  refunds: number;
+  gross: number;
+  refunded: number;
+};
+
 export function ReportsScreen({
   onNotice,
+  canViewTeam,
 }: {
   onNotice: (message: string) => void;
+  canViewTeam: boolean;
 }) {
   const { t, language } = useI18n();
   const [range, setRange] = useState("today");
@@ -29,6 +56,7 @@ export function ReportsScreen({
   const [custom, setCustom] = useState({ from: "", to: "" });
   const [cash, setCash] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
+  const [team, setTeam] = useState<WorkerActivity | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [registerBusy, setRegisterBusy] = useState(false);
@@ -49,14 +77,16 @@ export function ReportsScreen({
     setLoading(true);
     setError("");
     try {
-      const [overview, cashSession, cashSessions] = await Promise.all([
+      const [overview, cashSession, cashSessions, workerActivity] = await Promise.all([
         window.pos.getOverview(dates()),
         window.pos.getCashSession(),
         window.pos.listCashSessions(),
+        canViewTeam ? window.pos.workerActivity(dates()) : Promise.resolve(null),
       ]);
       setReport(overview);
       setCash(cashSession);
       setSessions(cashSessions as any[]);
+      setTeam(workerActivity as WorkerActivity | null);
     } catch (value) {
       setError(localizeError(language, value));
     } finally {
@@ -65,8 +95,9 @@ export function ReportsScreen({
   };
   useEffect(() => {
     if (range !== "custom") void load();
-  }, [range]);
+  }, [range, canViewTeam]);
   const summary = report?.summary ?? {};
+  const workers = mergeWorkerInsights(team);
   return (
     <div className="report-stack">
       <PageHeader
@@ -191,7 +222,8 @@ export function ReportsScreen({
                       <span>
                         <strong>{row.product_name}</strong>
                         <small>
-                          {row.variant_name || `${row.quantity} ${t("sold")}`}
+                          {row.variant_name ? `${row.variant_name} · ` : ""}
+                          {row.quantity} {t("sold")}
                         </small>
                       </span>
                       <b>{money(row.revenue)}</b>
@@ -219,6 +251,49 @@ export function ReportsScreen({
               )}
             </section>
           </div>
+          {canViewTeam && (
+            <section className="panel team-insights-panel">
+              <div className="section-title">
+                <div>
+                  <p className="eyebrow">{t("team")}</p>
+                  <h3>{t("teamInsights")}</h3>
+                  <p className="team-insights-help">{t("teamInsightsText")}</p>
+                </div>
+                <span className="team-insights-icon" aria-hidden="true">
+                  <UsersRound />
+                </span>
+              </div>
+              {workers.length ? (
+                <div className="team-insights-list">
+                  {workers.map((worker) => {
+                    const net = worker.gross - worker.refunded;
+                    const average = worker.sales ? worker.gross / worker.sales : 0;
+                    return (
+                      <div className="team-insight-row" key={worker.id}>
+                        <div className="team-insight-name">
+                          <strong>{worker.name}</strong>
+                          <small>
+                            {worker.sales} {t("completedSales").toLowerCase()}
+                            {worker.refunds ? ` · ${worker.refunds} ${t("refunds").toLowerCase()}` : ""}
+                          </small>
+                        </div>
+                        <div>
+                          <small>{t("averageTicket")}</small>
+                          <b>{money(average)}</b>
+                        </div>
+                        <div className="team-insight-net">
+                          <small>{t("netSales")}</small>
+                          <b>{money(net)}</b>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="muted team-insights-empty">{t("noData")}</p>
+              )}
+            </section>
+          )}
           <section className="panel register-panel">
             <div>
               <p className="eyebrow">{t("register")}</p>
@@ -317,6 +392,47 @@ export function ReportsScreen({
         </>
       )}
     </div>
+  );
+}
+
+function mergeWorkerInsights(activity: WorkerActivity | null): WorkerInsight[] {
+  if (!activity) return [];
+  const workers = new Map<string, WorkerInsight>();
+  const add = (
+    id: string | null,
+    name: string | null,
+    values: Partial<Pick<WorkerInsight, "sales" | "refunds" | "gross" | "refunded">>,
+  ) => {
+    const key = id ?? "unassigned";
+    const current = workers.get(key) ?? {
+      id: key,
+      name: name || "—",
+      sales: 0,
+      refunds: 0,
+      gross: 0,
+      refunded: 0,
+    };
+    current.name = current.name === "—" && name ? name : current.name;
+    current.sales += Number(values.sales ?? 0);
+    current.refunds += Number(values.refunds ?? 0);
+    current.gross += Number(values.gross ?? 0);
+    current.refunded += Number(values.refunded ?? 0);
+    workers.set(key, current);
+  };
+  activity.sales.forEach((row) =>
+    add(row.operator_id, row.operator_name, {
+      sales: row.sale_count,
+      gross: row.sales_total,
+    }),
+  );
+  activity.refunds.forEach((row) =>
+    add(row.operator_id, row.operator_name, {
+      refunds: row.refund_count,
+      refunded: row.refunds_total,
+    }),
+  );
+  return [...workers.values()].sort(
+    (left, right) => right.gross - right.refunded - (left.gross - left.refunded),
   );
 }
 

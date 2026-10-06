@@ -1,8 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { app, BrowserWindow, protocol, shell } from "electron";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { app, BrowserWindow, dialog, Menu, protocol, shell } from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 import { PosDatabase } from "./database";
 import { registerIpc } from "./ipc";
 import { SyncService } from "./sync";
@@ -17,11 +18,43 @@ let syncTimer: NodeJS.Timeout | null = null;
 let backupTimer: NodeJS.Timeout | null = null;
 let updater: PosUpdater | null = null;
 
+function startupLog(message: string, error?: unknown) {
+  const detail = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : error ? String(error) : "";
+  const line = `[${new Date().toISOString()}] ${message}${detail ? `\n${detail}` : ""}\n`;
+  console.error(line);
+  try {
+    appendFileSync(path.join(app.getPath("userData"), "startup.log"), line);
+  } catch {
+    // Logging must never prevent the POS from opening.
+  }
+}
+
 function applicationIcon() {
   const iconPath = app.isPackaged
     ? path.join(process.resourcesPath, "icon.png")
     : path.join(__dirname, "../build/icon.png");
   return existsSync(iconPath) ? iconPath : undefined;
+}
+
+function installApplicationMenu() {
+  // Deliberately omit Electron's default View menu: it includes Reload.
+  const template: MenuItemConstructorOptions[] = [
+    ...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    {
+      label: "View",
+      submenu: [
+        { role: "togglefullscreen" },
+        { type: "separator" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { role: "resetZoom" },
+      ],
+    },
+    { role: "windowMenu" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function createWindow() {
@@ -39,6 +72,24 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    startupLog(`Renderer process ended: ${details.reason} (exit ${details.exitCode})`);
+  });
+  mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => {
+    startupLog(`Renderer failed to load ${url}: ${description} (${code})`);
+  });
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const key = input.key.toLowerCase();
+    const isReloadShortcut = key === "f5" || ((input.control || input.meta) && key === "r");
+    if (!isReloadShortcut) return;
+
+    // POS state is intentionally long-lived. Never let Chromium discard an
+    // in-progress cart; F5/Ctrl+R/Command+R request a data-only refresh instead.
+    event.preventDefault();
+    const target = mainWindow;
+    if (target && !target.isDestroyed()) target.webContents.send("pos:soft-refresh");
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -88,15 +139,24 @@ protocol.registerSchemesAsPrivileged([
   { scheme: "shea-asset", privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
-if (!app.requestSingleInstanceLock()) app.quit();
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+if (!ownsSingleInstanceLock) {
+  startupLog("A Shea POS instance already owns the application lock");
+  app.quit();
+}
 else {
   app.on("second-instance", () => {
-    if (mainWindow) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      mainWindow = createWindow();
+    } else {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
       mainWindow.focus();
     }
   });
   app.whenReady().then(() => {
+    startupLog("Starting Shea POS");
+    installApplicationMenu();
     const icon = applicationIcon();
     if (process.platform === "darwin" && icon) app.dock?.setIcon(icon);
     PosDatabase.applyStagedRestore(app.getPath("userData"));
@@ -152,8 +212,19 @@ else {
     backupTimer = setInterval(() => database && void runAutomaticBackup(database).catch(() => undefined), 6 * 60 * 60 * 1000);
     if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     else void assets.localizeActiveProducts();
+  }).catch((error) => {
+    startupLog("Shea POS could not start", error);
+    dialog.showErrorBox(
+      "Shea POS could not start",
+      "The startup error was saved to startup.log in the Shea POS support folder.\n\n" +
+        (error instanceof Error ? error.message : String(error)),
+    );
+    app.quit();
   });
 }
+
+process.on("uncaughtException", (error) => startupLog("Uncaught main-process error", error));
+process.on("unhandledRejection", (error) => startupLog("Unhandled main-process rejection", error));
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

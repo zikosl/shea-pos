@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ArchiveRestore,
-  ChevronLeft,
-  ChevronRight,
   CircleDollarSign,
   Filter,
   LoaderCircle,
@@ -18,11 +16,13 @@ import {
 } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
+import { Pagination } from "../../components/Pagination";
 import { localeFor, localizeError, useI18n } from "../../i18n";
 import { money } from "../../shared/format";
 import type { CartLine, Catalog, Product } from "../../types";
 
 const PAGE_SIZE = 40;
+export const HOLD_SALE_SHORTCUT_EVENT = "shea-pos:hold-sale";
 const initials = (name: string) =>
   name
     .trim()
@@ -56,8 +56,10 @@ export function PosScreen({
   const [priceProduct, setPriceProduct] = useState<Product | null>(null);
   const [heldCarts, setHeldCarts] = useState<any[]>([]);
   const [showHeldCarts, setShowHeldCarts] = useState(false);
+  const [holdingSale, setHoldingSale] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [hasNextPage, setHasNextPage] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -69,13 +71,16 @@ export function PosScreen({
           search,
           categoryId,
           nicheId,
-          limit: PAGE_SIZE,
+          // One extra result makes the Next state accurate without a count query.
+          limit: PAGE_SIZE + 1,
           offset,
         }),
         window.pos.listCatalog(),
         window.pos.getCashSession(),
       ]);
-      setProducts(productRows as Product[]);
+      const pageRows = productRows as Product[];
+      setProducts(pageRows.slice(0, PAGE_SIZE));
+      setHasNextPage(pageRows.length > PAGE_SIZE);
       setCatalog(catalogValue as Catalog);
       setCashSession(session);
     } catch (value) {
@@ -146,7 +151,8 @@ export function PosScreen({
     }
   }
   async function holdCurrentCart() {
-    if (!cart.length) return;
+    if (!cart.length || holdingSale) return;
+    setHoldingSale(true);
     try {
       await window.pos.holdCart({
         customerName: customerName.trim() || undefined,
@@ -156,8 +162,17 @@ export function PosScreen({
       setCustomerName("");
       onNotice(t("saleHeld"));
       searchRef.current?.focus();
-    } catch (error) { onNotice(localizeError(language, error)); }
+    } catch (error) {
+      onNotice(localizeError(language, error));
+    } finally {
+      setHoldingSale(false);
+    }
   }
+  useEffect(() => {
+    const holdSale = () => void holdCurrentCart();
+    window.addEventListener(HOLD_SALE_SHORTCUT_EVENT, holdSale);
+    return () => window.removeEventListener(HOLD_SALE_SHORTCUT_EVENT, holdSale);
+  });
   async function openHeldCarts() {
     try {
       setHeldCarts(await window.pos.listHeldCarts() as any[]);
@@ -391,23 +406,13 @@ export function PosScreen({
             />
           )}
           {!loading && !loadError && (
-            <div className="pagination pos-pagination">
-              <button
-                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-                disabled={!offset}
-              >
-                <ChevronLeft />
-              </button>
-              <span>
-                {t("page")} {offset / PAGE_SIZE + 1}
-              </span>
-              <button
-                onClick={() => setOffset(offset + PAGE_SIZE)}
-                disabled={products.length < PAGE_SIZE}
-              >
-                <ChevronRight />
-              </button>
-            </div>
+            <Pagination
+              className="pos-pagination"
+              page={offset / PAGE_SIZE}
+              pageSize={PAGE_SIZE}
+              hasNext={hasNextPage}
+              onPageChange={(page) => setOffset(page * PAGE_SIZE)}
+            />
           )}
         </section>
         <aside className="checkout-panel">
@@ -422,7 +427,7 @@ export function PosScreen({
             </div>
             {cart.length > 0 && (
               <div className="checkout-head-actions">
-                <button className="quiet-action" onClick={() => void holdCurrentCart()}><Pause />{t("holdSale")}</button>
+                <button className="quiet-action" aria-keyshortcuts="F3" title="F3" disabled={!cart.length || holdingSale} onClick={() => void holdCurrentCart()}>{holdingSale ? <LoaderCircle className="spin" /> : <Pause />}{t("holdSale")}</button>
                 <button className="quiet-action" onClick={() => setCart([])}><Trash2 />{t("clearSale")}</button>
               </div>
             )}

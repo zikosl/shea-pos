@@ -196,7 +196,7 @@ const invoiceCorrectionSchema = z.object({
 });
 const refundSaleSchema = z.object({
   saleId: z.string().uuid(),
-  reason: z.string().trim().min(3).max(500),
+  reason: z.string().trim().max(500).optional().default(""),
   lines: z.array(z.object({ saleItemId: z.string().uuid(), quantity: z.number().positive() })).min(1).max(250),
 });
 const heldCartSchema = z.object({

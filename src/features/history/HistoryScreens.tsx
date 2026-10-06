@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eye, FileClock, LoaderCircle, Pencil, Printer, ReceiptText, RotateCcw, ScanLine, Search, X } from "lucide-react";
+import { Eye, FileClock, LoaderCircle, Minus, Pencil, Plus, Printer, ReceiptText, RotateCcw, ScanLine, Search, X } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
+import { Pagination } from "../../components/Pagination";
 import { PageHeader } from "../../components/PageHeader";
+import { TextAreaField } from "../../components/TextAreaField";
 import { money } from "../../shared/format";
 import { localeFor, localizeError, localizeValue, useI18n } from "../../i18n";
 import { OrderActivity } from "./OrderActivity";
@@ -10,6 +12,8 @@ import { OrderActivity } from "./OrderActivity";
 export function OrdersScreen() {
   const { t, language } = useI18n();
   const [rows, setRows] = useState<any[]>([]);
+  const [page, setPage] = useState(0);
+  const pageSize = 25;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<any | null>(null);
@@ -20,6 +24,7 @@ export function OrdersScreen() {
     setError("");
     try {
       setRows((await window.pos.listOrders()) as any[]);
+      setPage(0);
     } catch (value) {
       setError(localizeError(language, value));
     } finally {
@@ -29,6 +34,7 @@ export function OrdersScreen() {
   useEffect(() => {
     void load();
   }, []);
+  const currentRows = rows.slice(page * pageSize, (page + 1) * pageSize);
   async function transition(order: any, status: "PARTNER_ACCEPTED" | "PREPARING" | "READY") {
     setBusy(true); setError("");
     try {
@@ -62,7 +68,7 @@ export function OrdersScreen() {
               <span>{t("status")}</span>
               <span>{t("total")}</span>
             </div>
-            {rows.map((row) => (
+            {currentRows.map((row) => (
               <button type="button" className="table-row table-row-button" key={row.server_id} onClick={() => setSelected(row)}>
                 <span>
                   <strong>#{row.server_id}</strong>
@@ -78,6 +84,7 @@ export function OrdersScreen() {
                 <span>{money(row.total)}</span>
               </button>
             ))}
+            <Pagination page={page} pageSize={pageSize} total={rows.length} onPageChange={setPage} />
           </div>
         ) : (
           <EmptyState
@@ -128,14 +135,18 @@ export function InvoicesScreen({
   settings,
   canCorrect,
   canRefund,
+  onGoToPos,
 }: {
   onNotice: (message: string) => void;
   settings: Record<string, string>;
   canCorrect: boolean;
   canRefund: boolean;
+  onGoToPos: () => void;
 }) {
   const { t, language } = useI18n();
   const [rows, setRows] = useState<any[]>([]);
+  const [page, setPage] = useState(0);
+  const pageSize = 25;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [source, setSource] = useState<"ALL" | "POS" | "DELIVERY">("ALL");
@@ -169,6 +180,8 @@ export function InvoicesScreen({
       (!needle || [row.number, row.customer_name, row.status].some((value) => String(value ?? "").toLowerCase().includes(needle))),
     );
   }, [rows, source, query]);
+  useEffect(() => setPage(0), [source, query]);
+  const currentRows = filtered.slice(page * pageSize, (page + 1) * pageSize);
   async function openReceipt(row: any) {
     setPreviewSale(row);
     setPreviewHtml("");
@@ -245,7 +258,7 @@ export function InvoicesScreen({
               <span>{t("total")}</span>
               <span />
             </div>
-            {filtered.map((row) => (
+            {currentRows.map((row) => (
               <div className="table-row invoice-row" key={`${row.source}-${row.id}`}>
                 <span>
                   <strong>{row.number}</strong>
@@ -269,6 +282,7 @@ export function InvoicesScreen({
                 </span>
               </div>
             ))}
+            <Pagination page={page} pageSize={pageSize} total={filtered.length} onPageChange={setPage} />
           </div>
         ) : (
           <EmptyState
@@ -288,12 +302,12 @@ export function InvoicesScreen({
         </div>
       ) : null}
       {correcting ? <InvoiceCorrectionDialog invoice={correcting} onClose={() => setCorrecting(null)} onSaved={(sale) => void corrected(sale)} /> : null}
-      {refunding ? <RefundSaleDialog invoice={refunding} onClose={() => setRefunding(null)} onRefunded={async () => { setRefunding(null); setPreviewSale(null); await load(); onNotice(t("saleRefunded")); }} /> : null}
+      {refunding ? <RefundSaleDialog invoice={refunding} onClose={() => setRefunding(null)} onGoToPos={() => { setRefunding(null); setPreviewSale(null); onGoToPos(); }} onRefunded={async () => { setRefunding(null); setPreviewSale(null); await load(); onNotice(t("saleRefunded")); }} /> : null}
     </div>
   );
 }
 
-function RefundSaleDialog({ invoice, onClose, onRefunded }: { invoice: any; onClose: () => void; onRefunded: () => void }) {
+function RefundSaleDialog({ invoice, onClose, onGoToPos, onRefunded }: { invoice: any; onClose: () => void; onGoToPos: () => void; onRefunded: () => void }) {
   const { t, language } = useI18n();
   const [details, setDetails] = useState<any | null>(null);
   const [quantities, setQuantities] = useState<Record<string, number>>({});
@@ -301,18 +315,25 @@ function RefundSaleDialog({ invoice, onClose, onRefunded }: { invoice: any; onCl
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
-    window.pos.getSaleDetails(invoice.id).then(setDetails).catch((value) => setError(localizeError(language, value)));
+    window.pos.getSaleDetails(invoice.id).then((result) => {
+      const saleDetails = result as { items?: any[] };
+      setDetails(saleDetails);
+      setQuantities(Object.fromEntries((saleDetails.items ?? []).map((item: any) => {
+        const remaining = Math.max(0, Number(item.quantity) - Number(item.returned_quantity ?? 0));
+        return [item.id, remaining > 0 ? 1 : 0];
+      })));
+    }).catch((value) => setError(localizeError(language, value)));
   }, [invoice.id, language]);
   const selected = (details?.items ?? []).filter((item: any) => Number(quantities[item.id] ?? 0) > 0);
   const amount = selected.reduce((sum: number, item: any) => sum + Number(item.total) * (Number(quantities[item.id]) / Number(item.quantity)), 0);
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await window.pos.refundSale({ saleId: invoice.id, reason, lines: selected.map((item: any) => ({ saleItemId: item.id, quantity: Number(quantities[item.id]) })) });
+      await window.pos.refundSale({ saleId: invoice.id, reason: reason.trim(), lines: selected.map((item: any) => ({ saleItemId: item.id, quantity: Number(quantities[item.id]) })) });
       onRefunded();
     } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); }
   }
-  return <div className="modal-backdrop elevated-modal" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="modal-card refund-dialog" onSubmit={submit}><div className="dialog-heading"><div><p className="eyebrow">{invoice.number}</p><h2>{t("refundSale")}</h2><p>{t("refundSaleHelp")}</p></div><button type="button" className="icon-button" disabled={busy} onClick={onClose}><X /></button></div>{details ? <div className="refund-lines">{details.items.map((item: any) => { const remaining = Number(item.quantity) - Number(item.returned_quantity ?? 0); return <label key={item.id}><span><strong>{item.product_name}</strong><small>{remaining} {t("returnable")}</small></span><input type="number" min="0" max={remaining} step="1" value={quantities[item.id] ?? 0} onChange={(event) => setQuantities((current) => ({ ...current, [item.id]: Math.max(0, Math.min(remaining, Number(event.target.value))) }))} /></label>; })}</div> : !error ? <LoadingState label={t("loadingData")} compact /> : null}<label>{t("refundReason")}<textarea required minLength={3} maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} /></label><div className="quotation-total"><span>{t("cashRefund")}</span><strong>{money(amount)}</strong></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="submit" className="button primary danger" disabled={busy || !selected.length || reason.trim().length < 3}>{busy ? <LoaderCircle className="spin" /> : <RotateCcw />}{t("confirmRefund")}</button></div></form></div>;
+  return <div className="modal-backdrop elevated-modal" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="modal-card refund-dialog" onSubmit={submit}><div className="dialog-heading"><div><p className="eyebrow">{invoice.number}</p><h2>{t("refundSale")}</h2><p>{t("refundSaleHelp")}</p></div><button type="button" className="icon-button" disabled={busy} onClick={onClose}><X /></button></div>{details ? <div className="refund-lines">{details.items.map((item: any) => { const remaining = Math.max(0, Number(item.quantity) - Number(item.returned_quantity ?? 0)); const quantity = Number(quantities[item.id] ?? 0); return <div className="refund-line" key={item.id}><span><strong>{item.product_name}</strong><small>{remaining} {t("returnable")}</small></span><div className="quantity-stepper" aria-label={`${item.product_name} ${t("quantity")}`}><button type="button" aria-label={t("decreaseQuantity")} disabled={busy || quantity <= 0} onClick={() => setQuantities((current) => ({ ...current, [item.id]: Math.max(0, quantity - 1) }))}><Minus /></button><input aria-label={t("quantity")} type="number" min="0" max={remaining} step="1" value={quantity} onChange={(event) => { const next = Number(event.target.value); setQuantities((current) => ({ ...current, [item.id]: Number.isFinite(next) ? Math.max(0, Math.min(remaining, next)) : 0 })); }} /><button type="button" aria-label={t("increaseQuantity")} disabled={busy || quantity >= remaining} onClick={() => setQuantities((current) => ({ ...current, [item.id]: Math.min(remaining, quantity + 1) }))}><Plus /></button></div></div>; })}</div> : !error ? <LoadingState label={t("loadingData")} compact /> : null}<TextAreaField label={t("refundReason")} hint={t("refundReasonHint")} maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} /><div className="quotation-total"><span>{t("cashRefund")}</span><strong>{money(amount)}</strong></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button ghost" disabled={busy} onClick={onGoToPos}>{t("returnToPos")}</button><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="submit" className="button primary danger" disabled={busy || !selected.length}>{busy ? <LoaderCircle className="spin" /> : <RotateCcw />}{t("confirmRefund")}</button></div></form></div>;
 }
 
 function InvoiceCorrectionDialog({ invoice, onClose, onSaved }: { invoice: any; onClose: () => void; onSaved: (sale: any) => void }) {
@@ -335,5 +356,5 @@ function InvoiceCorrectionDialog({ invoice, onClose, onSaved }: { invoice: any; 
       setBusy(false);
     }
   }
-  return <div className="modal-backdrop elevated-modal" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="modal-card invoice-correction-dialog" onSubmit={submit}><div className="dialog-heading"><div><p className="eyebrow">{invoice.number}</p><h2>{t("editInvoiceDetails")}</h2><p>{t("editInvoiceDetailsHelp")}</p></div><button type="button" className="icon-button" disabled={busy} onClick={onClose}><X /></button></div><div className="form-grid"><label>{t("customerName")}<input value={customerName} maxLength={120} onChange={(event) => setCustomerName(event.target.value)} /></label><label className="wide">{t("note")}<textarea value={note} maxLength={1000} onChange={(event) => setNote(event.target.value)} /></label><label className="wide">{t("correctionReason")}<textarea required minLength={3} maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} placeholder={t("correctionReasonPlaceholder")} /></label></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="submit" className="button primary" disabled={busy || reason.trim().length < 3}>{busy ? <LoaderCircle className="spin" /> : null}{t("saveCorrection")}</button></div></form></div>;
+  return <div className="modal-backdrop elevated-modal" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="modal-card invoice-correction-dialog" onSubmit={submit}><div className="dialog-heading"><div><p className="eyebrow">{invoice.number}</p><h2>{t("editInvoiceDetails")}</h2><p>{t("editInvoiceDetailsHelp")}</p></div><button type="button" className="icon-button" disabled={busy} onClick={onClose}><X /></button></div><div className="form-grid"><label>{t("customerName")}<input value={customerName} maxLength={120} onChange={(event) => setCustomerName(event.target.value)} /></label><TextAreaField wrapperClassName="wide" label={t("note")} maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /><TextAreaField wrapperClassName="wide" label={t("correctionReason")} required minLength={3} maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} placeholder={t("correctionReasonPlaceholder")} /></div>{error ? <p className="form-error">{error}</p> : null}<div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={onClose}>{t("cancel")}</button><button type="submit" className="button primary" disabled={busy || reason.trim().length < 3}>{busy ? <LoaderCircle className="spin" /> : null}{t("saveCorrection")}</button></div></form></div>;
 }

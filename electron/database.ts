@@ -1091,11 +1091,12 @@ export class PosDatabase {
     const to = input.to || null;
     const sales = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) sale_count,
       COALESCE(SUM(total),0) sales_total FROM sales
-      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      WHERE status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED')
+      AND (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
       GROUP BY operator_id,operator_name`).all(operatorId, operatorId, from, from, to, to) as any[];
     const refunds = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) refund_count,
       COALESCE(SUM(amount),0) refunds_total FROM sale_refunds
-      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      WHERE status='COMPLETED' AND (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
       GROUP BY operator_id,operator_name`).all(operatorId, operatorId, from, from, to, to) as any[];
     const orders = this.db.prepare(`SELECT operator_id,operator_name,COUNT(*) action_count,
       SUM(CASE WHEN action='CREATE_CUSTOM_ORDER' THEN 1 ELSE 0 END) created_count
@@ -1104,7 +1105,8 @@ export class PosDatabase {
       .all(operatorId, operatorId, from, from, to, to) as any[];
     const entries = this.db.prepare(`SELECT id,sale_number reference,'SALE' action,total amount,
       operator_id,operator_name,created_at FROM sales
-      WHERE (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
+      WHERE status IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED')
+      AND (? IS NULL OR operator_id=?) AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<=?)
       UNION ALL
       SELECT r.id,s.sale_number,'REFUND',r.amount,r.operator_id,r.operator_name,r.created_at
       FROM sale_refunds r JOIN sales s ON s.id=r.sale_id
@@ -1948,7 +1950,6 @@ export class PosDatabase {
     if (new Set(input.lines.map((line) => line.saleItemId)).size !== input.lines.length)
       throw new Error("DUPLICATE_REFUND_ITEM");
     const reason = input.reason.trim();
-    if (reason.length < 3) throw new Error("REFUND_REASON_REQUIRED");
     const session = this.getCashSession() as any;
     if (!session) throw new Error("Open the register before refunding cash");
     return this.db.transaction(() => {
@@ -2005,7 +2006,6 @@ export class PosDatabase {
     if (!input.lines.length) throw new Error("REFUND_ITEMS_REQUIRED");
     if (new Set(input.lines.map((line) => line.saleItemId)).size !== input.lines.length)
       throw new Error("DUPLICATE_REFUND_ITEM");
-    if (input.reason.trim().length < 3) throw new Error("REFUND_REASON_REQUIRED");
     const session = this.getCashSession() as any;
     if (!session) throw new Error("Open the register before refunding cash");
     const sale = this.db.prepare("SELECT * FROM sales WHERE id=?").get(input.saleId) as any;
