@@ -192,7 +192,10 @@ else {
       }
     });
     void assets.initialize();
-    const sync = new SyncService(database, assets);
+    const sync = new SyncService(database, assets, () => {
+      if (mainWindow && !mainWindow.isDestroyed())
+        mainWindow.webContents.send("pos:data-sync-complete");
+    });
     const gateway = new GatewayService(database);
     const existingState = sync.state();
     if (

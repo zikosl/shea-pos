@@ -165,6 +165,7 @@ export type PosApi = {
   installUpdate(): Promise<void>;
   onUpdateStatus(listener: (status: import("./updater").UpdateStatus) => void): () => void;
   onSoftRefresh(listener: () => void): () => void;
+  onDataSyncComplete(listener: () => void): () => void;
   getState(): Promise<unknown>;
   copyText(value: string): Promise<void>;
   getGatewayStatus(): Promise<unknown>;

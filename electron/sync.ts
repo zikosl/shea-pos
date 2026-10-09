@@ -10,6 +10,7 @@ export class SyncService {
   constructor(
     private readonly database: PosDatabase,
     private readonly assets?: ProductAssetService,
+    private readonly onDataSyncComplete?: () => void,
   ) {}
 
   private async activeSession() {
@@ -123,6 +124,11 @@ export class SyncService {
         result.posBootstrap.cursor,
         result.posBootstrap.offlineUntil,
       );
+      try {
+        this.onDataSyncComplete?.();
+      } catch {
+        // A renderer notification must not turn a successful sync into a failure.
+      }
       await this.assets?.localizeActiveProducts();
       this.database.setSetting("lastSyncError", pushErrors[0] ?? "");
       return this.state();

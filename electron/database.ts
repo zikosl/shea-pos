@@ -1150,7 +1150,25 @@ export class PosDatabase {
 
   listHeldCarts() {
     return (this.db.prepare("SELECT * FROM held_carts ORDER BY updated_at DESC").all() as any[])
-      .map((row) => ({ ...row, payload: JSON.parse(row.payload_json) }));
+      .map((row) => {
+        const payload = JSON.parse(row.payload_json);
+        // A hold stores stable line ids, then resolves the present local product
+        // record here so resumed carts keep the offline-ready image URL.
+        const lines = (payload.lines ?? []).map((line: any) => {
+          const localId = line.productLocalId ?? line.product?.local_id;
+          const product = this.db.prepare(
+            `SELECT p.*,t.name_ar FROM products p
+             LEFT JOIN templates t ON t.id=p.template_id WHERE p.local_id=?`,
+          ).get(localId) as any;
+          return {
+            ...line,
+            product: product
+              ? { ...product, image: this.productImageUrl(product) ?? this.remoteProductImageUrl(product) }
+              : line.product,
+          };
+        });
+        return { ...row, payload: { ...payload, lines } };
+      });
   }
 
   holdCart(input: HeldCartInput & { operatorId?: string; operatorName?: string }) {
@@ -1158,9 +1176,23 @@ export class PosDatabase {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
     const lines = input.lines.map((line) => {
-      const product = this.db.prepare("SELECT local_id,name,variant_name,price,discount,stock,inventory_policy,image FROM products WHERE local_id=? AND active=1").get(line.productLocalId) as any;
+      const product = this.db.prepare(
+        `SELECT p.*,t.name_ar FROM products p
+         LEFT JOIN templates t ON t.id=p.template_id
+         WHERE p.local_id=? AND p.active=1`,
+      ).get(line.productLocalId) as any;
       if (!product) throw new Error("Product is no longer available");
-      return { product, quantity: line.quantity, unitPrice: line.unitPrice };
+      return {
+        productLocalId: line.productLocalId,
+        product: {
+          ...product,
+          // Persist the same local-first source the live cart uses. This lets a
+          // held sale resume even when its original server image is unavailable.
+          image: this.productImageUrl(product) ?? this.remoteProductImageUrl(product),
+        },
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+      };
     });
     this.db.prepare(`INSERT INTO held_carts(id,name,customer_name,payload_json,operator_id,operator_name,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,customer_name=excluded.customer_name,

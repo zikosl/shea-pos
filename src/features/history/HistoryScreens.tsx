@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Eye, FileClock, LoaderCircle, Minus, Pencil, Plus, Printer, ReceiptText, RotateCcw, ScanLine, Search, X } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorState, LoadingState } from "../../components/AsyncState";
@@ -19,21 +19,28 @@ export function OrdersScreen() {
   const [selected, setSelected] = useState<any | null>(null);
   const [quoting, setQuoting] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
-  const load = async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError("");
     try {
-      setRows((await window.pos.listOrders()) as any[]);
-      setPage(0);
+      const nextRows = (await window.pos.listOrders()) as any[];
+      setRows(nextRows);
+      if (silent) {
+        setPage((current) => Math.min(current, Math.max(0, Math.ceil(nextRows.length / pageSize) - 1)));
+        setSelected((current: any | null) => current ? nextRows.find((row) => row.server_id === current.server_id) ?? current : null);
+      } else {
+        setPage(0);
+      }
     } catch (value) {
       setError(localizeError(language, value));
     } finally {
       setLoading(false);
     }
-  };
+  }, [language]);
   useEffect(() => {
     void load();
-  }, []);
+    return window.pos.onDataSyncComplete(() => void load(true));
+  }, [load]);
   const currentRows = rows.slice(page * pageSize, (page + 1) * pageSize);
   async function transition(order: any, status: "PARTNER_ACCEPTED" | "PREPARING" | "READY") {
     setBusy(true); setError("");

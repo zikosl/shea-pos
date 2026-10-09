@@ -32,6 +32,12 @@ const initials = (name: string) =>
     .join("")
     .toUpperCase();
 
+function ProductThumbnail({ image }: { image?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!image || failed) return <ShoppingBag />;
+  return <img src={image} alt="" onError={() => setFailed(true)} />;
+}
+
 export function PosScreen({
   onNotice,
   onChanged,
@@ -427,7 +433,7 @@ export function PosScreen({
             </div>
             {cart.length > 0 && (
               <div className="checkout-head-actions">
-                <button className="quiet-action" aria-keyshortcuts="F3" title="F3" disabled={!cart.length || holdingSale} onClick={() => void holdCurrentCart()}>{holdingSale ? <LoaderCircle className="spin" /> : <Pause />}{t("holdSale")}</button>
+                <button className="quiet-action" aria-keyshortcuts="F3" title={`${t("holdSale")} (F3)`} disabled={!cart.length || holdingSale} onClick={() => void holdCurrentCart()}>{holdingSale ? <LoaderCircle className="spin" /> : <Pause />}{t("holdSale")}<kbd aria-hidden="true">F3</kbd></button>
                 <button className="quiet-action" onClick={() => setCart([])}><Trash2 />{t("clearSale")}</button>
               </div>
             )}
@@ -452,11 +458,7 @@ export function PosScreen({
               cart.map((line) => (
                 <article className="checkout-line" key={line.product.local_id}>
                   <div className="line-thumb">
-                    {line.product.image ? (
-                      <img src={line.product.image} alt="" />
-                    ) : (
-                      <ShoppingBag />
-                    )}
+                    <ProductThumbnail image={line.product.image} />
                   </div>
                   <div className="line-copy">
                     <strong>{localized(line.product)}</strong>
@@ -620,7 +622,7 @@ export function PosScreen({
         <Modal onClose={() => setShowHeldCarts(false)}>
           <div className="held-carts-dialog">
             <div className="dialog-heading"><div><p className="eyebrow">{t("heldSales")}</p><h2>{t("resumeSale")}</h2></div><button type="button" className="icon-button" onClick={() => setShowHeldCarts(false)}><X /></button></div>
-            {heldCarts.length ? <div className="held-cart-list">{heldCarts.map((held) => <button type="button" key={held.id} onClick={() => void resumeCart(held)}><span><strong>{held.customer_name || t("walkInCustomer")}</strong><small>{new Date(held.updated_at).toLocaleString(localeFor(language))}</small></span><b>{held.payload?.lines?.reduce((sum: number, line: any) => sum + Number(line.quantity), 0) ?? 0} {t("items")}</b></button>)}</div> : <EmptyState icon={ArchiveRestore} title={t("noHeldSales")} text={t("noHeldSalesText")} />}
+            {heldCarts.length ? <div className="held-cart-list">{heldCarts.map((held) => <button type="button" key={held.id} onClick={() => void resumeCart(held)}><span className="held-cart-preview" aria-hidden="true">{(held.payload?.lines ?? []).slice(0, 3).map((line: any, index: number) => line.product?.image ? <img key={`${line.product_local_id ?? line.product?.local_id ?? index}-${index}`} src={line.product.image} alt="" /> : <span key={`${line.product_local_id ?? index}-${index}`}><PackageOpen /></span>)}</span><span className="held-cart-summary"><strong>{held.customer_name || t("walkInCustomer")}</strong><small>{new Date(held.updated_at).toLocaleString(localeFor(language))}</small></span><b>{held.payload?.lines?.reduce((sum: number, line: any) => sum + Number(line.quantity), 0) ?? 0} {t("items")}</b></button>)}</div> : <EmptyState icon={ArchiveRestore} title={t("noHeldSales")} text={t("noHeldSalesText")} />}
           </div>
         </Modal>
       )}
