@@ -124,12 +124,12 @@ export class SyncService {
         result.posBootstrap.cursor,
         result.posBootstrap.offlineUntil,
       );
+      await this.assets?.localizeActiveProducts();
       try {
         this.onDataSyncComplete?.();
       } catch {
         // A renderer notification must not turn a successful sync into a failure.
       }
-      await this.assets?.localizeActiveProducts();
       this.database.setSetting("lastSyncError", pushErrors[0] ?? "");
       return this.state();
     } catch (error) {
