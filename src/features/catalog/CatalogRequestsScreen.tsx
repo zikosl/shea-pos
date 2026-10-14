@@ -22,7 +22,7 @@ const newVariant = (index: number): VariantDraft => ({
   sku: "",
   skuEdited: false,
   price: "",
-  stock: "0",
+  stock: "",
 });
 
 export function CatalogRequestsScreen({ onNotice }: { onNotice: (message: string) => void }) {
@@ -259,7 +259,7 @@ export function CatalogRequestsScreen({ onNotice }: { onNotice: (message: string
                 <label>{t("tags")}<input required placeholder={t("tagsPlaceholder")} value={variant.tags} onChange={(event) => updateVariant(variant.id, "tags", event.target.value)} /><small>{t("tagsHelp")}</small></label>
                 <label>{t("sku")}<input required value={variant.sku} onChange={(event) => updateVariant(variant.id, "sku", event.target.value)} /></label>
                 <label>{t("price")}<input type="number" min="0" step="0.01" required value={variant.price} onChange={(event) => updateVariant(variant.id, "price", event.target.value)} /></label>
-                <label>{t("stock")}<input type="number" min="0" step="1" required value={variant.stock} onChange={(event) => updateVariant(variant.id, "stock", event.target.value)} /></label>
+                <label>{t("stock")}<input type="number" min="0" step="1" value={variant.stock} onChange={(event) => updateVariant(variant.id, "stock", event.target.value)} /></label>
               </div>
               <button type="button" className="icon-button variant-remove" aria-label={t("remove")} disabled={variants.length === 1} onClick={() => setVariants((current) => current.filter((item) => item.id !== variant.id))}><X /></button>
             </article>)}

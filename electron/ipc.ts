@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from "electron";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { PosDatabase } from "./database";
@@ -45,6 +45,10 @@ const listSchema = z
     search: z.string().max(120).optional(),
     categoryId: z.number().int().positive().optional(),
     nicheId: z.number().int().positive().optional(),
+    productTypeId: z.number().int().positive().optional(),
+    brandId: z.number().int().positive().optional(),
+    grouped: z.boolean().optional(),
+    unaddedOnly: z.boolean().optional(),
     limit: z.number().int().min(1).max(250).optional(),
     offset: z.number().int().min(0).optional(),
   })
@@ -124,6 +128,7 @@ const activateSchema = z.object({
   stock: z.number().int().min(0),
   trackInventory: z.boolean(),
   reorderThreshold: z.number().int().min(0).optional(),
+  available: z.boolean().optional(),
   visibleInPos: z.boolean().optional(),
   priceOnRequest: z.boolean().optional(),
 });
@@ -136,7 +141,7 @@ const localProductSchema = z.object({
   brandId: z.number().int().positive().optional(),
   variantName: z.string().trim().max(120).optional(),
   sku: z.string().trim().max(120).optional(),
-  image: z.string().max(1000).optional(),
+  image: z.string().startsWith("draft:catalog-drafts/").max(1000).optional(),
   price: z.number().min(0),
   costPrice: z.number().min(0).optional(),
   stock: z.number().int().min(0),
@@ -282,8 +287,9 @@ const customOrderQuotationSchema = z.object({
 });
 const onlineOrderTransitionSchema = z.object({
   id: z.number().int().positive(),
-  status: z.enum(["PARTNER_ACCEPTED", "PREPARING", "READY"]),
+  status: z.enum(["PARTNER_ACCEPTED", "PARTNER_REJECTED", "PREPARING", "READY"]),
   expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(1000).optional(),
 });
 const onlineOrderQuotationSchema = z.object({
   id: z.number().int().positive(),
@@ -337,8 +343,17 @@ export function registerIpc(
   mainWindow: BrowserWindow,
   updater: PosUpdater,
   gateway: GatewayService,
+  onSessionChanged?: (active: boolean) => void,
 ) {
+  let syncDebounce: NodeJS.Timeout | null = null;
   const state = () => ({ ...sync.state(), localAccess: access.state() });
+  const scheduleSync = () => {
+    if (syncDebounce) clearTimeout(syncDebounce);
+    syncDebounce = setTimeout(() => {
+      syncDebounce = null;
+      void sync.sync().catch(() => undefined);
+    }, 400);
+  };
   const requireCapability = (capability: string) => {
     const enabled = JSON.parse(database.getSetting("capabilities") ?? "[]") as string[];
     if (!enabled.includes(capability)) throw new Error(`CAPABILITY_REQUIRED:${capability}`);
@@ -346,15 +361,38 @@ export function registerIpc(
   const handle = (
     channel: string,
     listener: (...args: any[]) => unknown,
-    options: { permission?: Permission | Permission[]; authenticated?: boolean; audit?: boolean } = {},
+    options: { permission?: Permission | Permission[]; authenticated?: boolean; audit?: boolean; syncAfter?: boolean } = {},
   ) => ipcMain.handle(channel, async (_event, ...args) => {
     if (options.permission || options.authenticated)
       access.require(options.permission);
     const result = await listener(...args);
     if (options.audit) access.audit(channel.replace("pos:", "").toUpperCase());
+    if (options.syncAfter) scheduleSync();
     return result;
   });
   handle("pos:get-state", state);
+  handle("pos:notify-new-order", (raw) => {
+    const input = z.object({ id: z.number().int().positive(), title: z.string().trim().min(1).max(120), body: z.string().trim().min(1).max(240) }).parse(raw);
+    if (mainWindow.isFocused() || !Notification.isSupported()) return;
+    const notification = new Notification({
+      title: input.title,
+      body: input.body,
+      silent: false,
+    });
+    notification.on("click", () => {
+      if (mainWindow.isDestroyed()) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.webContents.send("pos:open-order-notification", input.id);
+    });
+    notification.show();
+  }, { permission: "ORDERS_VIEW", authenticated: true });
+  handle("pos:list-unread-online-order-ids", () => database.listUnreadOnlineOrderIds(), { permission: "ORDERS_VIEW" });
+  handle("pos:mark-online-orders-seen", (raw) => {
+    const ids = z.array(z.number().int().positive()).max(100).parse(raw);
+    return database.markOnlineOrdersSeen(ids);
+  }, { permission: "ORDERS_VIEW" });
   handle("pos:copy-text", (raw) => clipboard.writeText(z.string().max(10_000).parse(raw)), { authenticated: true });
   handle("pos:get-gateway-status", () => gateway.status(), { authenticated: true });
   handle("pos:get-store-network", () => sync.storeNetwork(), { permission: "SETTINGS_MANAGE" });
@@ -395,6 +433,7 @@ export function registerIpc(
     await sync.activate({ endpoint, ...result.signIn }, input.deviceName);
     if (!boundPartnerUserId)
       database.setSetting("boundPartnerUserId", String(result.signIn.user.id));
+    onSessionChanged?.(true);
     return state();
   });
   handle("pos:sign-out", async () => {
@@ -408,6 +447,7 @@ export function registerIpc(
     if (session?.tokenId) await logoutAccountSession(session).catch(() => undefined);
     access.logout();
     clearSession(database);
+    onSessionChanged?.(false);
     return undefined;
   }, { authenticated: true });
   handle("pos:list-account-sessions", async () => {
@@ -499,18 +539,18 @@ export function registerIpc(
     await assets.localizeProduct(product.local_id);
     return product;
   },
-  { permission: "INVENTORY_MANAGE", audit: true });
+  { permission: "INVENTORY_MANAGE", audit: true, syncAfter: true });
   handle("pos:create-local-product", async (raw) => {
     const product = database.createLocalProduct(localProductSchema.parse(raw)) as { local_id: string };
     await assets.localizeProduct(product.local_id);
     return product;
   },
-  { permission: "CATALOG_REQUEST", audit: true });
+  { permission: "CATALOG_REQUEST", audit: true, syncAfter: true });
   handle("pos:create-local-product-bundle", async (raw) => {
     const products = database.createLocalProductBundle(localProductBundleSchema.parse(raw)) as Array<{ local_id: string }>;
     await Promise.all(products.map((product) => assets.localizeProduct(product.local_id)));
     return products;
-  }, { permission: "CATALOG_REQUEST", audit: true });
+  }, { permission: "CATALOG_REQUEST", audit: true, syncAfter: true });
   handle("pos:select-catalog-image", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Choose product image",
@@ -520,6 +560,19 @@ export function registerIpc(
     if (result.canceled || !result.filePaths[0]) return null;
     return assets.importCatalogDraft(result.filePaths[0]);
   }, { permission: "CATALOG_REQUEST" });
+  handle("pos:paste-catalog-image", async () => {
+    const items = await clipboard.read();
+    for (const item of items) {
+      const mimeType = item.types.find((type) => ["image/png", "image/jpeg", "image/webp"].includes(type));
+      if (!mimeType) continue;
+      const blob = await item.getType(mimeType) as Blob;
+      return assets.importCatalogDraftBytes(Buffer.from(await blob.arrayBuffer()), mimeType);
+    }
+    throw new Error("Copy an image first, then paste it here");
+  }, { permission: "CATALOG_REQUEST" });
+  handle("pos:import-catalog-image-url", (raw) =>
+    assets.importCatalogDraftUrl(z.string().trim().url().max(2048).parse(raw)),
+  { permission: "CATALOG_REQUEST" });
   handle("pos:get-overview", (raw) =>
     database.overview(reportSchema.parse(raw)),
   { permission: "REPORTS_VIEW" });
@@ -536,37 +589,40 @@ export function registerIpc(
   handle("pos:transition-online-order", (raw) => {
     sync.assertCanTransact();
     const input = onlineOrderTransitionSchema.parse(raw);
-    return database.queueOnlineOrderCommand(input.id, "TRANSITION_ONLINE_ORDER", input.status, input, access.require("ORDERS_VIEW"));
-  }, { permission: "ORDERS_VIEW", audit: true });
+    if (input.status === "PARTNER_REJECTED" && !input.reason) throw new Error("ORDER_TRANSITION_REASON_REQUIRED");
+    const queued = database.queueOnlineOrderCommand(input.id, "TRANSITION_ONLINE_ORDER", input.status, input, access.require("ORDERS_VIEW"));
+    return queued;
+  }, { permission: "ORDERS_VIEW", audit: true, syncAfter: true });
   handle("pos:create-online-order-quotation", (raw) => {
     sync.assertCanTransact();
     const input = onlineOrderQuotationSchema.parse(raw);
-    return database.queueOnlineOrderCommand(input.id, "CREATE_ONLINE_ORDER_QUOTATION", "AWAITING_CLIENT_APPROVAL", input, access.require("ORDERS_VIEW"));
-  }, { permission: "ORDERS_VIEW", audit: true });
+    const queued = database.queueOnlineOrderCommand(input.id, "CREATE_ONLINE_ORDER_QUOTATION", "AWAITING_CLIENT_APPROVAL", input, access.require("ORDERS_VIEW"));
+    return queued;
+  }, { permission: "ORDERS_VIEW", audit: true, syncAfter: true });
   handle("pos:list-gift-orders", () => { requireCapability("CUSTOM_ORDERS"); return database.listGiftOrders(); }, { permission: "CUSTOM_ORDERS_VIEW" });
   handle("pos:create-custom-order", (raw) => {
     requireCapability("GIFT_BUILDER");
     sync.assertCanTransact();
     return database.createCustomOrder(customOrderSchema.parse(raw), access.require("CUSTOM_ORDERS_MANAGE"));
-  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
+  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true, syncAfter: true });
   handle("pos:transition-custom-order", (raw) => {
     requireCapability("CUSTOM_ORDERS");
     sync.assertCanTransact();
     const input = customOrderTransitionSchema.parse(raw);
     return database.transitionCustomOrder(input.id, input.status, access.require("CUSTOM_ORDERS_MANAGE"));
-  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
+  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true, syncAfter: true });
   handle("pos:create-custom-order-quotation", (raw) => {
     requireCapability("QUOTATIONS");
     sync.assertCanTransact();
     const input = customOrderQuotationSchema.parse(raw);
     return database.queueCustomOrderCommand(input.id, "CREATE_CUSTOM_ORDER_QUOTATION", "AWAITING_CUSTOMER_APPROVAL", input, access.require("CUSTOM_ORDERS_MANAGE"));
-  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
+  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true, syncAfter: true });
   handle("pos:reserve-custom-order-materials", (raw) => {
     requireCapability("PRODUCTION");
     sync.assertCanTransact();
     const { id } = z.object({ id: z.string().min(1) }).parse(raw);
     return database.queueCustomOrderCommand(id, "RESERVE_CUSTOM_ORDER_MATERIALS", "MATERIALS_RESERVED", {}, access.require("CUSTOM_ORDERS_MANAGE"));
-  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true });
+  }, { permission: "CUSTOM_ORDERS_MANAGE", audit: true, syncAfter: true });
   handle("pos:list-invoices", () => database.listInvoices(), { permission: "INVOICES_VIEW" });
   handle("pos:lookup-invoice", (raw) => database.lookupInvoice(invoiceLookupSchema.parse(raw).reference), { permission: "INVOICES_VIEW" });
   handle("pos:correct-invoice-details", (raw) => {
@@ -617,7 +673,7 @@ export function registerIpc(
       await gateway.refreshProducts();
       return result;
     });
-  }, { permission: "STOCK_RECEIVE", audit: true });
+  }, { permission: "STOCK_RECEIVE", audit: true, syncAfter: true });
   handle("pos:cancel-stock-entry", async (rawId) => {
     const id = z.string().uuid().parse(rawId);
     if (!gateway.enabled()) return database.cancelStockEntry(id);
@@ -626,15 +682,15 @@ export function registerIpc(
     const result = database.cancelStockEntry(id, true);
     await gateway.refreshProducts();
     return result;
-  }, { permission: "STOCK_RECEIVE", audit: true });
+  }, { permission: "STOCK_RECEIVE", audit: true, syncAfter: true });
   handle("pos:list-proposals", () => database.listProposals(), { permission: "CATALOG_REQUEST" });
   handle("pos:list-outbox", () => database.listOutbox(), { permission: "SYNC_MANAGE" });
   handle("pos:retry-outbox", (id) =>
     database.retryOutbox(z.string().uuid().parse(id)),
-  { permission: "SYNC_MANAGE", audit: true });
+  { permission: "SYNC_MANAGE", audit: true, syncAfter: true });
   handle("pos:create-proposal", (raw) =>
     database.createProposal(proposalSchema.parse(raw)),
-  { permission: "CATALOG_REQUEST", audit: true });
+  { permission: "CATALOG_REQUEST", audit: true, syncAfter: true });
   handle("pos:checkout", async (raw) => {
     sync.assertCanTransact();
     const user = access.require("POS_SELL");
@@ -652,7 +708,7 @@ export function registerIpc(
     recordSale(sale);
     await gateway.refreshProducts();
     return sale;
-  }, { permission: "POS_SELL" });
+  }, { permission: "POS_SELL", syncAfter: true });
   handle("pos:get-cash-session", () => database.getCashSession(), { permission: ["POS_SELL", "REGISTER_MANAGE"] });
   handle("pos:list-cash-sessions", () => database.listCashSessions(), { permission: "REGISTER_MANAGE" });
   handle("pos:open-cash-session", (raw) => {
@@ -678,32 +734,26 @@ export function registerIpc(
   handle("pos:adjust-stock", async (raw) => {
     const input = stockSchema.parse(raw);
     if (gateway.enabled()) await gateway.adjustStock(input);
-    const result = database.adjustStock({ ...input, gatewayCommitted: gateway.enabled() });
-    if (gateway.enabled()) await gateway.refreshProducts();
-    return result;
+    return database.adjustStock({ ...input, gatewayCommitted: gateway.enabled() });
   },
-  { permission: "INVENTORY_MANAGE", audit: true });
+  { permission: "INVENTORY_MANAGE", audit: true, syncAfter: true });
   handle("pos:update-product", async (raw) => {
     const input = productUpdateSchema.parse(raw);
     if (input.vendorBarcode && gateway.enabled()) {
       throw new Error("Barcode assignment is not available through the local gateway yet. Connect this POS directly to the cloud to assign it.");
     }
     if (gateway.enabled()) await gateway.updateProduct(input);
-    const result = database.updateProduct({ ...input, gatewayCommitted: gateway.enabled() });
-    if (gateway.enabled()) await gateway.refreshProducts();
-    return result;
+    return database.updateProduct({ ...input, gatewayCommitted: gateway.enabled() });
   },
-  { permission: "INVENTORY_MANAGE", audit: true });
+  { permission: "INVENTORY_MANAGE", audit: true, syncAfter: true });
   handle("pos:refresh-product-image", async (raw) => {
     const input = z.object({ productLocalId: z.string().min(1) }).parse(raw);
-    await sync.sync();
     return assets.refreshProduct(input.productLocalId);
   }, { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:refresh-product-images", async (raw) => {
     const input = z.object({
       productLocalIds: z.array(z.string().min(1)).max(500).optional(),
     }).optional().parse(raw);
-    await sync.sync();
     return assets.refreshProducts(input?.productLocalIds);
   }, { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:list-printers", () => listPrinters(mainWindow), { authenticated: true });

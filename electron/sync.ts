@@ -6,6 +6,7 @@ import type { ProductAssetService } from "./assets";
 
 export class SyncService {
   private running = false;
+  private syncRequestedWhileRunning = false;
 
   constructor(
     private readonly database: PosDatabase,
@@ -91,7 +92,10 @@ export class SyncService {
   }
 
   async sync(forceRetry = false) {
-    if (this.running) return this.state();
+    if (this.running) {
+      this.syncRequestedWhileRunning = true;
+      return this.state();
+    }
     this.running = true;
     try {
       let session = await this.activeSession();
@@ -140,7 +144,35 @@ export class SyncService {
       throw error;
     } finally {
       this.running = false;
+      if (this.syncRequestedWhileRunning) {
+        this.syncRequestedWhileRunning = false;
+        void this.sync().catch(() => undefined);
+      }
     }
+  }
+
+  async refreshOnlineOrder(id: number) {
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error("Invalid order id");
+    const session = await this.activeSession();
+    const result = await graphqlRequest<{ getOrder: any | null }>(
+      session.endpoint,
+      `query PosRealtimeOrder($id: Int!) { getOrder(id: $id) { id status version source pricingMode subtotal discount appTax deliveryTax storeTax walkInCustomerName date updatedAt client { firstname lastname user { email } } items { id productId nameSnapshot skuSnapshot variantSnapshot quantity price } delivery { status type price scheduledAt } } }`,
+      { id },
+      session.accessToken,
+    );
+    if (!result.getOrder) return [];
+    return this.database.upsertOnlineOrders([result.getOrder]);
+  }
+
+  async refreshOnlineOrders() {
+    const session = await this.activeSession();
+    const result = await graphqlRequest<{ listPartnerPosOrders: any[] }>(
+      session.endpoint,
+      `query PosRealtimeOrders { listPartnerPosOrders { id status version source pricingMode subtotal discount appTax deliveryTax storeTax walkInCustomerName date updatedAt client { firstname lastname user { email } } items { id productId nameSnapshot skuSnapshot variantSnapshot quantity price } delivery { status type price scheduledAt } } }`,
+      {},
+      session.accessToken,
+    );
+    return this.database.upsertOnlineOrders(result.listPartnerPosOrders ?? []);
   }
 
   private async push(session: Session, forceRetry = false) {
@@ -211,8 +243,8 @@ export class SyncService {
           const data = await graphqlRequest<{ createProduct: { id: number } }>(
             session.endpoint,
             `
-            mutation ActivatePosProduct($variantId: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $stock: Int, $trackInventory: Boolean, $reorderThreshold: Int, $isVisibleInPos: Boolean) {
-              createProduct(variantId: $variantId, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, stock: $stock, trackInventory: $trackInventory, reorderThreshold: $reorderThreshold, isVisibleInPos: $isVisibleInPos, available: true, isActive: true) { id }
+            mutation ActivatePosProduct($variantId: Int!, $price: Float, $priceOnRequest: Boolean, $costPrice: Float, $stock: Int, $trackInventory: Boolean, $reorderThreshold: Int, $isVisibleInPos: Boolean, $available: Boolean) {
+              createProduct(variantId: $variantId, price: $price, priceOnRequest: $priceOnRequest, costPrice: $costPrice, stock: $stock, trackInventory: $trackInventory, reorderThreshold: $reorderThreshold, isVisibleInPos: $isVisibleInPos, available: $available, isActive: true) { id }
             }
           `,
             {
@@ -386,8 +418,8 @@ export class SyncService {
         } else if (row.operation === "TRANSITION_ONLINE_ORDER") {
           const data = await graphqlRequest<{ transitionOrderStatus: any }>(
             session.endpoint,
-            `mutation TransitionOnlineOrder($id: Int!, $status: OrderStatus!, $expectedVersion: Int!) { transitionOrderStatus(id: $id, status: $status, expectedVersion: $expectedVersion) { id status version subtotal discount appTax deliveryTax storeTax } }`,
-            { id: payload.id, status: payload.status, expectedVersion: payload.expectedVersion },
+            `mutation TransitionOnlineOrder($id: Int!, $status: OrderStatus!, $expectedVersion: Int!, $reason: String) { transitionOrderStatus(id: $id, status: $status, expectedVersion: $expectedVersion, reason: $reason) { id status version subtotal discount appTax deliveryTax storeTax } }`,
+            { id: payload.id, status: payload.status, expectedVersion: payload.expectedVersion, reason: payload.reason },
             session.accessToken,
           );
           this.database.markOnlineOrderSynced(data.transitionOrderStatus);

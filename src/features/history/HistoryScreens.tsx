@@ -9,7 +9,7 @@ import { money } from "../../shared/format";
 import { localeFor, localizeError, localizeValue, useI18n } from "../../i18n";
 import { OrderActivity } from "./OrderActivity";
 
-export function OrdersScreen() {
+export function OrdersScreen({ openOrderId, onOpenedOrder, onUnreadOrdersChanged }: { openOrderId?: number | null; onOpenedOrder?: () => void; onUnreadOrdersChanged?: (count: number) => void }) {
   const { t, language } = useI18n();
   const [rows, setRows] = useState<any[]>([]);
   const [page, setPage] = useState(0);
@@ -18,6 +18,8 @@ export function OrdersScreen() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<any | null>(null);
   const [quoting, setQuoting] = useState<any | null>(null);
+  const [rejecting, setRejecting] = useState<any | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const [busy, setBusy] = useState(false);
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -25,6 +27,12 @@ export function OrdersScreen() {
     try {
       const nextRows = (await window.pos.listOrders()) as any[];
       setRows(nextRows);
+      try {
+        const unreadIds = await window.pos.markOnlineOrdersSeen(nextRows.map((row) => Number(row.server_id)).filter(Number.isSafeInteger));
+        onUnreadOrdersChanged?.(unreadIds.length);
+      } catch {
+        // Showing the inbox must still work if local read-state cannot be saved.
+      }
       if (silent) {
         setPage((current) => Math.min(current, Math.max(0, Math.ceil(nextRows.length / pageSize) - 1)));
         setSelected((current: any | null) => current ? nextRows.find((row) => row.server_id === current.server_id) ?? current : null);
@@ -36,18 +44,29 @@ export function OrdersScreen() {
     } finally {
       setLoading(false);
     }
-  }, [language]);
+  }, [language, onUnreadOrdersChanged]);
   useEffect(() => {
     void load();
-    return window.pos.onDataSyncComplete(() => void load(true));
+    const unsubscribeSync = window.pos.onDataSyncComplete(() => void load(true));
+    const unsubscribeRealtimeOrders = window.pos.onRealtimeOrder(() => void load(true));
+    return () => {
+      unsubscribeSync();
+      unsubscribeRealtimeOrders();
+    };
   }, [load]);
+  useEffect(() => {
+    if (!openOrderId || loading) return;
+    const row = rows.find((item) => Number(item.server_id) === openOrderId);
+    if (row) setSelected(row);
+    onOpenedOrder?.();
+  }, [openOrderId, loading, rows, onOpenedOrder]);
   const currentRows = rows.slice(page * pageSize, (page + 1) * pageSize);
-  async function transition(order: any, status: "PARTNER_ACCEPTED" | "PREPARING" | "READY") {
+  async function transition(order: any, status: "PARTNER_ACCEPTED" | "PARTNER_REJECTED" | "PREPARING" | "READY", reason?: string) {
     setBusy(true); setError("");
     try {
-      await window.pos.transitionOnlineOrder({ id: order.server_id, status, expectedVersion: order.version });
-      setSelected(null);
-      await load();
+      await window.pos.transitionOnlineOrder({ id: order.server_id, status, expectedVersion: order.version, reason });
+      setRejecting(null); setRejectReason(""); setSelected(null);
+      await load(true);
     } catch (value) { setError(localizeError(language, value)); } finally { setBusy(false); }
   }
   return (
@@ -101,8 +120,9 @@ export function OrdersScreen() {
           />
         )}
       </div>
-      {selected ? <OnlineOrderDrawer order={selected} busy={busy} onClose={() => setSelected(null)} onQuote={() => setQuoting(selected)} onTransition={(status) => void transition(selected, status)} /> : null}
+      {selected ? <OnlineOrderDrawer order={selected} busy={busy} onClose={() => setSelected(null)} onQuote={() => setQuoting(selected)} onReject={() => { setRejectReason(""); setRejecting(selected); }} onTransition={(status) => void transition(selected, status)} /> : null}
       {quoting ? <OnlineOrderQuotationDialog order={quoting} onClose={() => setQuoting(null)} onSubmitted={async () => { setQuoting(null); setSelected(null); await load(); }} /> : null}
+      {rejecting ? <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && setRejecting(null)}><section className="modal-card order-reject-dialog" role="dialog" aria-modal="true" aria-labelledby="reject-order-title"><div className="dialog-heading"><div><p className="eyebrow">#{rejecting.server_id}</p><h2 id="reject-order-title">{t("declineOrderTitle")}</h2></div><button type="button" className="icon-button" disabled={busy} onClick={() => setRejecting(null)}><X /></button></div><p className="muted-text">{t("declineOrderHelp")}</p><TextAreaField label={t("declineReason")} value={rejectReason} onChange={(event) => setRejectReason(event.target.value)} maxLength={1000} autoFocus /><div className="dialog-actions"><button type="button" className="button secondary" disabled={busy} onClick={() => setRejecting(null)}>{t("cancel")}</button><button type="button" className="button danger" disabled={busy || !rejectReason.trim()} onClick={() => void transition(rejecting, "PARTNER_REJECTED", rejectReason.trim())}>{busy ? <LoaderCircle className="spin" /> : null}{t("declineOrder")}</button></div></section></div> : null}
     </div>
   );
 }
@@ -111,13 +131,13 @@ function parseOrderPayload(order: any) {
   try { return JSON.parse(order.payload_json ?? "{}"); } catch { return {}; }
 }
 
-function OnlineOrderDrawer({ order, busy, onClose, onQuote, onTransition }: { order: any; busy: boolean; onClose: () => void; onQuote: () => void; onTransition: (status: "PARTNER_ACCEPTED" | "PREPARING" | "READY") => void }) {
+function OnlineOrderDrawer({ order, busy, onClose, onQuote, onReject, onTransition }: { order: any; busy: boolean; onClose: () => void; onQuote: () => void; onReject: () => void; onTransition: (status: "PARTNER_ACCEPTED" | "PREPARING" | "READY") => void }) {
   const { t, language } = useI18n();
   const payload = parseOrderPayload(order);
   const next = order.status === "REQUESTED" && order.pricing_mode !== "QUOTE_REQUIRED" ? "PARTNER_ACCEPTED"
     : ["PARTNER_ACCEPTED", "CONFIRMED"].includes(order.status) ? "PREPARING"
       : order.status === "PREPARING" ? "READY" : null;
-  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="order-drawer"><div className="dialog-heading"><div><p className="eyebrow">#{order.server_id}</p><h2>{order.customer_name || t("customer")}</h2></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="order-drawer-content"><div className="order-summary"><span><small>{t("status")}</small><em className="badge">{localizeValue(language, order.status)}</em></span><span><small>{t("deliveryStatus")}</small><strong>{localizeValue(language, order.delivery_status || "PENDING")}</strong></span><span><small>{t("total")}</small><strong>{money(order.total)}</strong></span></div><section><h3>{t("items")}</h3>{(payload.items ?? []).map((item: any) => <div className="drawer-line" key={item.id}><span><strong>{item.nameSnapshot || "#" + item.productId}</strong><small>{item.quantity} × {money(item.price)}</small></span><b>{money(Number(item.quantity) * Number(item.price))}</b></div>)}</section><OrderActivity orderType="ONLINE" orderId={String(order.server_id)} /></div><div className="drawer-actions">{order.status === "REQUESTED" && order.pricing_mode === "QUOTE_REQUIRED" ? <button type="button" className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={onQuote}>{t("createQuotation")}</button> : null}{next ? <button type="button" className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition(next)}>{busy ? <LoaderCircle className="spin" /> : null}{t("moveToNextStage")}</button> : null}{order.sync_state !== "SYNCED" ? <small>{order.last_error || t("syncBeforeWorkflow")}</small> : null}</div></aside></div>;
+  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="order-drawer"><div className="dialog-heading"><div><p className="eyebrow">#{order.server_id}</p><h2>{order.customer_name || t("customer")}</h2></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="order-drawer-content"><div className="order-summary"><span><small>{t("status")}</small><em className="badge">{localizeValue(language, order.status)}</em></span><span><small>{t("deliveryStatus")}</small><strong>{localizeValue(language, order.delivery_status || "PENDING")}</strong></span><span><small>{t("total")}</small><strong>{money(order.total)}</strong></span></div><section><h3>{t("items")}</h3>{(payload.items ?? []).map((item: any) => <div className="drawer-line" key={item.id}><span><strong>{item.nameSnapshot || "#" + item.productId}</strong><small>{item.quantity} × {money(item.price)}</small></span><b>{money(Number(item.quantity) * Number(item.price))}</b></div>)}</section><OrderActivity orderType="ONLINE" orderId={String(order.server_id)} /></div><div className="drawer-actions">{order.status === "REQUESTED" && order.pricing_mode === "QUOTE_REQUIRED" ? <button type="button" className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={onQuote}>{t("createQuotation")}</button> : null}{next ? <button type="button" className="button primary" disabled={busy || order.sync_state !== "SYNCED"} onClick={() => onTransition(next)}>{busy ? <LoaderCircle className="spin" /> : null}{order.status === "REQUESTED" ? t("acceptOrder") : t("moveToNextStage")}</button> : null}{order.status === "REQUESTED" ? <button type="button" className="button danger" disabled={busy || order.sync_state !== "SYNCED"} onClick={onReject}>{t("declineOrder")}</button> : null}{order.sync_state !== "SYNCED" ? <small>{order.last_error || t("syncBeforeWorkflow")}</small> : null}</div></aside></div>;
 }
 
 function OnlineOrderQuotationDialog({ order, onClose, onSubmitted }: { order: any; onClose: () => void; onSubmitted: () => void }) {

@@ -33,7 +33,6 @@ export class ProductAssetService {
   }
 
   async importCatalogDraft(sourcePath: string) {
-    await this.initialize();
     const extension = path.extname(sourcePath).toLowerCase();
     const mimeType = extension === ".png" ? "image/png"
       : extension === ".webp" ? "image/webp"
@@ -43,9 +42,40 @@ export class ProductAssetService {
     const details = await stat(sourcePath);
     if (!details.isFile() || !details.size || details.size > MAX_IMAGE_BYTES)
       throw new Error("Image must be smaller than 8 MB");
-    const bytes = await readFile(sourcePath);
+    return this.saveCatalogDraft(await readFile(sourcePath), mimeType);
+  }
+
+  async importCatalogDraftBytes(bytes: Buffer, mimeType: string) {
+    if (!MIME_EXTENSIONS[mimeType]) throw new Error("Unsupported image format. Use JPG, PNG, or WebP");
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error("Image must be smaller than 8 MB");
+    return this.saveCatalogDraft(bytes, mimeType);
+  }
+
+  async importCatalogDraftUrl(value: string) {
+    const assetBase = this.database.getSetting("assetBase") ?? "";
+    const url = resolveProductImageUrl(value.trim(), assetBase);
+    if (!url) throw new Error("Enter a public HTTPS image URL");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await this.fetchImage(url, controller.signal);
+      if (!response.ok) throw new Error(`Image download failed (${response.status})`);
+      const mimeType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+      if (!MIME_EXTENSIONS[mimeType]) throw new Error("URL must point directly to a JPG, PNG, or WebP image");
+      const declaredSize = Number(response.headers.get("content-length") || 0);
+      if (declaredSize > MAX_IMAGE_BYTES) throw new Error("Image must be smaller than 8 MB");
+      return this.importCatalogDraftBytes(Buffer.from(await response.arrayBuffer()), mimeType);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async saveCatalogDraft(bytes: Buffer, mimeType: string) {
+    await this.initialize();
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error("Image must be smaller than 8 MB");
+    const extension = MIME_EXTENSIONS[mimeType];
     const checksum = createHash("sha256").update(bytes).digest("hex");
-    const filename = `${checksum.slice(0, 24)}-${randomUUID().slice(0, 8)}${extension === ".jpeg" ? ".jpg" : extension}`;
+    const filename = `${checksum.slice(0, 24)}-${randomUUID().slice(0, 8)}${extension}`;
     const relativePath = path.posix.join("catalog-drafts", filename);
     await writeFile(path.join(this.root, relativePath), bytes, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
       if (error.code !== "EEXIST") throw error;
@@ -88,7 +118,7 @@ export class ProductAssetService {
     const row = this.database.productImageCandidate(localId);
     if (!row) throw new Error("This product does not have a server image path");
     await this.download(row, true, true);
-    return this.database.getProductByLocalId(localId);
+    return this.database.getInventoryProductByLocalId(localId);
   }
 
   async refreshProducts(localIds?: string[]) {
@@ -97,11 +127,15 @@ export class ProductAssetService {
     const rows = this.database
       .productImageCandidates()
       .filter((row) => !selected || selected.has(row.local_id));
-    const results: Array<{ localId: string; ok: boolean; error?: string }> = [];
+    const results: Array<{ localId: string; ok: boolean; error?: string; image?: string | null }> = [];
     for (const row of rows) {
       try {
         await this.download(row, true, true);
-        results.push({ localId: row.local_id, ok: true });
+        results.push({
+          localId: row.local_id,
+          ok: true,
+          image: this.database.getInventoryProductImageByLocalId(row.local_id),
+        });
       } catch (error) {
         results.push({
           localId: row.local_id,

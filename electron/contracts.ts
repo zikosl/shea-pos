@@ -68,6 +68,7 @@ export type ActivateProductInput = {
   stock: number;
   trackInventory: boolean;
   reorderThreshold?: number;
+  available?: boolean;
   visibleInPos?: boolean;
   priceOnRequest?: boolean;
 };
@@ -166,6 +167,11 @@ export type PosApi = {
   onUpdateStatus(listener: (status: import("./updater").UpdateStatus) => void): () => void;
   onSoftRefresh(listener: () => void): () => void;
   onDataSyncComplete(listener: () => void): () => void;
+  onRealtimeOrder(listener: (orderId: number) => void): () => void;
+  onOpenOrderNotification(listener: (orderId: number) => void): () => void;
+  notifyNewOrder(input: { id: number; title: string; body: string }): Promise<void>;
+  listUnreadOnlineOrderIds(): Promise<number[]>;
+  markOnlineOrdersSeen(ids: number[]): Promise<number[]>;
   getState(): Promise<unknown>;
   copyText(value: string): Promise<void>;
   getGatewayStatus(): Promise<unknown>;
@@ -221,17 +227,24 @@ export type PosApi = {
   listTemplates(input?: {
     search?: string;
     categoryId?: number;
+    nicheId?: number;
+    productTypeId?: number;
+    brandId?: number;
+    grouped?: boolean;
+    unaddedOnly?: boolean;
     limit?: number;
     offset?: number;
-  }): Promise<unknown[]>;
+  }): Promise<{ rows: unknown[]; total: number }>;
   activateProduct(input: ActivateProductInput): Promise<unknown>;
   createLocalProduct(input: CreateLocalProductInput): Promise<unknown>;
   createLocalProductBundle(input: CreateLocalProductBundleInput): Promise<unknown[]>;
   selectCatalogImage(): Promise<{ ref: string; previewUrl: string; filename: string; mimeType: string } | null>;
+  pasteCatalogImage(): Promise<{ ref: string; previewUrl: string; filename: string; mimeType: string }>;
+  importCatalogImageUrl(url: string): Promise<{ ref: string; previewUrl: string; filename: string; mimeType: string }>;
   getOverview(input?: { from?: string; to?: string }): Promise<unknown>;
   listSales(): Promise<unknown[]>;
   listOrders(): Promise<unknown[]>;
-  transitionOnlineOrder(input: { id: number; status: "PARTNER_ACCEPTED" | "PREPARING" | "READY"; expectedVersion: number }): Promise<unknown>;
+  transitionOnlineOrder(input: { id: number; status: "PARTNER_ACCEPTED" | "PARTNER_REJECTED" | "PREPARING" | "READY"; expectedVersion: number; reason?: string }): Promise<unknown>;
   createOnlineOrderQuotation(input: { id: number; expectedVersion: number; note?: string; lines: Array<{ orderItemId: number; unitPrice: number }> }): Promise<unknown>;
   listGiftOrders(): Promise<unknown[]>;
   createCustomOrder(input: CreateCustomOrderInput): Promise<unknown>;

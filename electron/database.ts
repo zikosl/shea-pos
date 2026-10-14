@@ -584,41 +584,74 @@ export class PosDatabase {
       search?: string;
       categoryId?: number;
       nicheId?: number;
+      productTypeId?: number;
+      brandId?: number;
+      grouped?: boolean;
+      unaddedOnly?: boolean;
       limit?: number;
       offset?: number;
     } = {},
   ) {
-    const search = `%${input.search?.trim() ?? ""}%`;
-    const rows = this.db
-      .prepare(
-        `SELECT v.id variant_id,v.template_id,v.name variant_name,v.description variant_description,
-      v.sku,v.image,v.tags_json,t.name,t.name_ar,t.description,t.category_id,t.product_type_id,t.brand_id,t.image template_image,
-      p.local_id product_local_id
-      FROM variants v JOIN templates t ON t.id=v.template_id
+    const term = input.search?.trim() ?? "";
+    const search = `%${term}%`;
+    const conditions = [
+      "(? = 0 OR t.category_id = ?)",
+      "(? = 0 OR c.niche_id = ?)",
+      "(? = 0 OR t.product_type_id = ?)",
+      "(? = 0 OR t.brand_id = ?)",
+      "(? = '' OR t.name LIKE ? OR COALESCE(t.name_ar,'') LIKE ? OR COALESCE(v.name,'') LIKE ? OR COALESCE(v.sku,'') LIKE ? OR COALESCE(t.description,'') LIKE ? OR COALESCE(v.description,'') LIKE ?)",
+      "(? = 0 OR p.local_id IS NULL)",
+    ];
+    const baseParams = [
+      input.categoryId ?? 0, input.categoryId ?? 0,
+      input.nicheId ?? 0, input.nicheId ?? 0,
+      input.productTypeId ?? 0, input.productTypeId ?? 0,
+      input.brandId ?? 0, input.brandId ?? 0,
+      term, search, search, search, search, search, search,
+      input.unaddedOnly ? 1 : 0,
+    ];
+    const from = `FROM variants v
+      JOIN templates t ON t.id=v.template_id
+      JOIN categories c ON c.id=t.category_id
       LEFT JOIN products p ON p.variant_id=v.id AND p.active=1
-      WHERE (? IS NULL OR t.category_id=?)
-        AND (t.name LIKE ? OR COALESCE(t.name_ar,'') LIKE ? OR COALESCE(v.name,'') LIKE ? OR COALESCE(v.sku,'') LIKE ?)
-      ORDER BY t.name,COALESCE(v.name,'') LIMIT ? OFFSET ?`,
-      )
-      .all(
-        input.categoryId ?? null,
-        input.categoryId ?? null,
-        search,
-        search,
-        search,
-        search,
-        Math.min(input.limit ?? 100, 250),
-        input.offset ?? 0,
-      ) as any[];
+      WHERE ${conditions.join(" AND ")}`;
+    const grouped = Boolean(input.grouped);
+    const totalRow = this.db.prepare(
+      `SELECT ${grouped ? "COUNT(DISTINCT t.id)" : "COUNT(*)"} total ${from}`,
+    ).get(...baseParams) as { total: number };
+    const limit = Math.min(input.limit ?? 50, 250);
+    const offset = input.offset ?? 0;
+    let rows: any[];
+    if (grouped) {
+      const groups = this.db.prepare(
+        `SELECT DISTINCT t.id,t.name ${from} ORDER BY t.name,t.id LIMIT ? OFFSET ?`,
+      ).all(...baseParams, limit, offset) as Array<{ id: number }>;
+      if (!groups.length) return { rows: [], total: totalRow.total };
+      const placeholders = groups.map(() => "?").join(",");
+      rows = this.db.prepare(
+        `SELECT v.id variant_id,v.template_id,v.name variant_name,v.description variant_description,
+        v.sku,v.image,v.tags_json,t.name,t.name_ar,t.description,t.category_id,t.product_type_id,t.brand_id,t.image template_image,
+        p.local_id product_local_id
+        ${from} AND t.id IN (${placeholders})
+        ORDER BY t.name,COALESCE(v.name,''),v.id`,
+      ).all(...baseParams, ...groups.map((group) => group.id)) as any[];
+    } else {
+      rows = this.db.prepare(
+        `SELECT v.id variant_id,v.template_id,v.name variant_name,v.description variant_description,
+        v.sku,v.image,v.tags_json,t.name,t.name_ar,t.description,t.category_id,t.product_type_id,t.brand_id,t.image template_image,
+        p.local_id product_local_id
+        ${from} ORDER BY t.name,COALESCE(v.name,''),v.id LIMIT ? OFFSET ?`,
+      ).all(...baseParams, limit, offset) as any[];
+    }
     const assetBase = this.getSetting("assetBase") ?? "";
-    return rows.map((row) => {
+    return { rows: rows.map((row) => {
       const image = row.image || row.template_image;
       return {
         ...row,
         image: image?.startsWith("/") ? `${assetBase}${image}` : image,
         tags: JSON.parse(row.tags_json || "[]"),
       };
-    });
+    }), total: totalRow.total };
   }
 
   overview(input: { from?: string; to?: string } = {}) {
@@ -887,9 +920,13 @@ export class PosDatabase {
           rejection_reason: row.rejectionReason ?? null,
         });
 
-      this.db.exec("DELETE FROM orders");
       const upsertOrder = this.db.prepare(
-        "INSERT INTO orders(server_id,status,delivery_status,pricing_mode,version,total,customer_name,payload_json,updated_at) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        `INSERT INTO orders(server_id,status,delivery_status,pricing_mode,version,total,customer_name,payload_json,sync_state,last_error,updated_at)
+         VALUES (?,?,?,?,?,?,?,?, 'SYNCED',NULL,?)
+         ON CONFLICT(server_id) DO UPDATE SET status=excluded.status,delivery_status=excluded.delivery_status,
+         pricing_mode=excluded.pricing_mode,version=excluded.version,total=excluded.total,customer_name=excluded.customer_name,
+         payload_json=excluded.payload_json,sync_state='SYNCED',last_error=NULL,updated_at=excluded.updated_at
+         WHERE orders.sync_state='SYNCED'`,
       );
       const deliveryStatuses = [
         "PENDING",
@@ -915,6 +952,7 @@ export class PosDatabase {
           Math.max(0, Number(row.subtotal ?? 0) + Number(row.appTax ?? 0) + Number(row.deliveryTax ?? 0) + Number(row.storeTax ?? 0) - Number(row.discount ?? 0)),
           row.walkInCustomerName ?? null,
           JSON.stringify(row),
+          row.updatedAt ?? row.date ?? new Date().toISOString(),
         );
       }
 
@@ -1208,6 +1246,79 @@ export class PosDatabase {
     return this.db
       .prepare("SELECT * FROM orders ORDER BY updated_at DESC LIMIT 100")
       .all();
+  }
+  upsertOnlineOrders(rows: any[]) {
+    const changed: number[] = [];
+    const deliveryStatuses = ["PENDING", "ACCEPTED", "READY", "ASSIGNED", "PICKED", "DELIVERED", "CANCELED"];
+    const upsert = this.db.prepare(`
+      INSERT INTO orders(server_id,status,delivery_status,pricing_mode,version,total,customer_name,payload_json,sync_state,last_error,updated_at)
+      VALUES (@id,@status,@deliveryStatus,@pricingMode,@version,@total,@customerName,@payload,'SYNCED',NULL,@updatedAt)
+      ON CONFLICT(server_id) DO UPDATE SET
+        status=excluded.status,delivery_status=excluded.delivery_status,pricing_mode=excluded.pricing_mode,
+        version=excluded.version,total=excluded.total,customer_name=excluded.customer_name,
+        payload_json=excluded.payload_json,sync_state='SYNCED',last_error=NULL,updated_at=excluded.updated_at
+      WHERE orders.sync_state='SYNCED'
+    `);
+    this.db.transaction(() => {
+      for (const row of rows) {
+        const id = Number(row.id);
+        if (!Number.isSafeInteger(id) || id <= 0) continue;
+        const current = this.db.prepare("SELECT status,delivery_status,version,sync_state FROM orders WHERE server_id=?").get(id) as any;
+        const deliveryStatus = typeof row.delivery?.status === "number"
+          ? deliveryStatuses[row.delivery.status] ?? "PENDING"
+          : String(row.delivery?.status ?? "PENDING");
+        const clientName = [row.client?.firstname, row.client?.lastname].filter(Boolean).join(" ").trim();
+        const customerName = row.walkInCustomerName || clientName || row.client?.user?.email || null;
+        const total = Math.max(0, Number(row.subtotal ?? 0) + Number(row.appTax ?? 0) + Number(row.deliveryTax ?? 0) + Number(row.storeTax ?? 0) - Number(row.discount ?? 0));
+        const result = upsert.run({
+          id,
+          status: row.status ?? "REQUESTED",
+          deliveryStatus,
+          pricingMode: row.pricingMode ?? "FIXED",
+          version: row.version ?? 1,
+          total,
+          customerName,
+          payload: JSON.stringify(row),
+          updatedAt: row.updatedAt ?? new Date().toISOString(),
+        });
+        if (result.changes && (!current || current.status !== row.status || current.delivery_status !== deliveryStatus || Number(current.version) !== Number(row.version))) changed.push(id);
+      }
+    })();
+    return changed;
+  }
+  initializeOnlineOrderReadState() {
+    if (this.getSetting("seenOnlineOrderIds") !== undefined) return;
+    const ids = this.listOrders().map((row: any) => Number(row.server_id)).filter(Number.isSafeInteger);
+    this.setSetting("seenOnlineOrderIds", JSON.stringify(ids));
+  }
+  listUnreadOnlineOrderIds() {
+    this.initializeOnlineOrderReadState();
+    let seenIds: number[] = [];
+    try {
+      const parsed = JSON.parse(this.getSetting("seenOnlineOrderIds") ?? "[]");
+      if (Array.isArray(parsed)) seenIds = parsed.filter(Number.isSafeInteger);
+    } catch {
+      // Recover from malformed local read-state without affecting orders.
+    }
+    const seen = new Set(seenIds);
+    return this.listOrders()
+      .map((row: any) => Number(row.server_id))
+      .filter((id) => Number.isSafeInteger(id) && !seen.has(id));
+  }
+  markOnlineOrdersSeen(ids: number[]) {
+    this.initializeOnlineOrderReadState();
+    const currentIds = new Set(this.listOrders().map((row: any) => Number(row.server_id)));
+    let seenIds: number[] = [];
+    try {
+      const parsed = JSON.parse(this.getSetting("seenOnlineOrderIds") ?? "[]");
+      if (Array.isArray(parsed)) seenIds = parsed.filter(Number.isSafeInteger);
+    } catch {
+      // Rebuild from the orders being marked below.
+    }
+    const seen = new Set(seenIds);
+    for (const id of ids) if (currentIds.has(id)) seen.add(id);
+    this.setSetting("seenOnlineOrderIds", JSON.stringify([...seen].sort((a, b) => a - b).slice(-5000)));
+    return this.listUnreadOnlineOrderIds();
   }
   queueOnlineOrderCommand(id: number, operation: "TRANSITION_ONLINE_ORDER" | "CREATE_ONLINE_ORDER_QUOTATION", optimisticStatus: string, command: Record<string, unknown>, operator: { id: string; name: string }) {
     const row = this.db.prepare("SELECT * FROM orders WHERE server_id=?").get(id) as any;
@@ -1573,7 +1684,7 @@ export class PosDatabase {
       this.db
         .prepare(
           `INSERT INTO products(local_id,variant_id,template_id,category_id,product_type_id,brand_id,name,variant_name,sku,image,remote_image_url,price,cost_price,stock,reorder_threshold,inventory_policy,available,visible_in_pos,active,price_on_request,provisional)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,1,?,1)`,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,1)`,
         )
         .run(
           localId,
@@ -1592,6 +1703,7 @@ export class PosDatabase {
           input.stock,
           input.reorderThreshold ?? 0,
           input.trackInventory ? "TRACKED" : "UNLIMITED",
+          input.available === false ? 0 : 1,
           input.visibleInPos === false ? 0 : 1,
           input.priceOnRequest ? 1 : 0,
         );
@@ -1608,6 +1720,12 @@ export class PosDatabase {
   createLocalProduct(input: CreateLocalProductInput) {
     const localId = randomUUID();
     const variantName = input.variantName?.trim() || "Default";
+    const draftRelativePath = input.image?.startsWith("draft:catalog-drafts/")
+      ? input.image.slice("draft:".length)
+      : null;
+    const localImage = draftRelativePath
+      ? `shea-asset://local/${draftRelativePath}`
+      : null;
     this.db.transaction(() => {
       this.db
         .prepare(
@@ -1622,8 +1740,8 @@ export class PosDatabase {
           input.name.trim(),
           variantName,
           input.sku ?? null,
-          input.image ?? null,
-          input.image ?? null,
+          localImage,
+          null,
           input.price,
           input.costPrice ?? 0,
           input.stock,
@@ -1631,6 +1749,10 @@ export class PosDatabase {
           input.trackInventory ? "TRACKED" : "UNLIMITED",
           input.priceOnRequest ? 1 : 0,
         );
+      if (draftRelativePath) {
+        this.db.prepare("UPDATE products SET local_image_path=?,image_sync_state='READY' WHERE local_id=?")
+          .run(draftRelativePath, localId);
+      }
       this.enqueue("SUBMIT_PRODUCT_REQUEST", "Product", localId, {
         posLocalId: localId,
         name: input.name.trim(),
@@ -2470,6 +2592,16 @@ export class PosDatabase {
         LEFT JOIN templates t ON t.id=p.template_id WHERE p.local_id=?`,
       )
       .get(localId) as any;
+  }
+  getInventoryProductByLocalId(localId: string) {
+    const row = this.getProductByLocalId(localId);
+    return row
+      ? { ...row, image: this.productImageUrl(row) ?? this.remoteProductImageUrl(row) }
+      : undefined;
+  }
+  getInventoryProductImageByLocalId(localId: string) {
+    const row = this.getProductByLocalId(localId);
+    return row ? this.productImageUrl(row) ?? this.remoteProductImageUrl(row) : null;
   }
   close() {
     this.db.close();

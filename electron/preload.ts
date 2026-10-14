@@ -21,6 +21,19 @@ const api: PosApi = {
     ipcRenderer.on("pos:data-sync-complete", handler);
     return () => ipcRenderer.removeListener("pos:data-sync-complete", handler);
   },
+  onRealtimeOrder: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, orderId: number) => listener(orderId);
+    ipcRenderer.on("pos:realtime-order", handler);
+    return () => ipcRenderer.removeListener("pos:realtime-order", handler);
+  },
+  onOpenOrderNotification: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, orderId: number) => listener(orderId);
+    ipcRenderer.on("pos:open-order-notification", handler);
+    return () => ipcRenderer.removeListener("pos:open-order-notification", handler);
+  },
+  notifyNewOrder: (input) => ipcRenderer.invoke("pos:notify-new-order", input),
+  listUnreadOnlineOrderIds: () => ipcRenderer.invoke("pos:list-unread-online-order-ids"),
+  markOnlineOrdersSeen: (ids) => ipcRenderer.invoke("pos:mark-online-orders-seen", ids),
   getState: () => ipcRenderer.invoke("pos:get-state"),
   copyText: (value) => ipcRenderer.invoke("pos:copy-text", value),
   getGatewayStatus: () => ipcRenderer.invoke("pos:get-gateway-status"),
@@ -59,6 +72,8 @@ const api: PosApi = {
   createLocalProductBundle: (input) =>
     ipcRenderer.invoke("pos:create-local-product-bundle", input),
   selectCatalogImage: () => ipcRenderer.invoke("pos:select-catalog-image"),
+  pasteCatalogImage: () => ipcRenderer.invoke("pos:paste-catalog-image"),
+  importCatalogImageUrl: (url) => ipcRenderer.invoke("pos:import-catalog-image-url", url),
   getOverview: (input) => ipcRenderer.invoke("pos:get-overview", input),
   listSales: () => ipcRenderer.invoke("pos:list-sales"),
   listOrders: () => ipcRenderer.invoke("pos:list-orders"),

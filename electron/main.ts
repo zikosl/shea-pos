@@ -11,12 +11,22 @@ import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
 import { PosUpdater } from "./updater";
 import { GatewayService } from "./gateway";
+import { OrderRealtimeService } from "./order-realtime";
 
 let mainWindow: BrowserWindow | null = null;
 let database: PosDatabase | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
+let onlineOrderPollTimer: NodeJS.Timeout | null = null;
 let backupTimer: NodeJS.Timeout | null = null;
 let updater: PosUpdater | null = null;
+let orderRealtime: OrderRealtimeService | null = null;
+const pendingRealtimeOrderIds = new Set<number>();
+
+function flushRealtimeOrderEvents() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+  for (const id of pendingRealtimeOrderIds) mainWindow.webContents.send("pos:realtime-order", id);
+  pendingRealtimeOrderIds.clear();
+}
 
 function startupLog(message: string, error?: unknown) {
   const detail = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : error ? String(error) : "";
@@ -78,6 +88,12 @@ function createWindow() {
   });
   mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => {
     startupLog(`Renderer failed to load ${url}: ${description} (${code})`);
+  });
+  mainWindow.webContents.on("did-finish-load", flushRealtimeOrderEvents);
+  mainWindow.webContents.on("console-message", (_event, level, message, lineNumber, sourceId) => {
+    if (level >= 2) {
+      startupLog(`Renderer console error at ${sourceId}:${lineNumber}`, message);
+    }
   });
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
@@ -161,6 +177,7 @@ else {
     if (process.platform === "darwin" && icon) app.dock?.setIcon(icon);
     PosDatabase.applyStagedRestore(app.getPath("userData"));
     database = new PosDatabase(app.getPath("userData"));
+    database.initializeOnlineOrderReadState();
     void runAutomaticBackup(database).catch((error) => database?.setSetting("lastBackupError", error instanceof Error ? error.message : "Backup failed"));
     const assets = new ProductAssetService(database, app.getPath("userData"));
     protocol.handle("shea-asset", async (request) => {
@@ -195,6 +212,15 @@ else {
     const sync = new SyncService(database, assets, () => {
       if (mainWindow && !mainWindow.isDestroyed())
         mainWindow.webContents.send("pos:data-sync-complete");
+      orderRealtime?.restartIfSessionChanged();
+    });
+    orderRealtime = new OrderRealtimeService(database, (event) => {
+      const orderId = Number(event.orderId);
+      if (!Number.isSafeInteger(orderId) || orderId <= 0) return;
+      void sync.refreshOnlineOrder(orderId).then(() => {
+        pendingRealtimeOrderIds.add(orderId);
+        flushRealtimeOrderEvents();
+      }).catch((error) => startupLog(`Realtime order ${orderId} refresh failed`, error));
     });
     const gateway = new GatewayService(database);
     const existingState = sync.state();
@@ -207,11 +233,22 @@ else {
     const access = new LocalAccessService(database);
     const window = createWindow();
     updater = new PosUpdater(window);
-    registerIpc(database!, sync, access, assets, window, updater, gateway);
+    registerIpc(database!, sync, access, assets, window, updater, gateway, (active) => {
+      if (active) orderRealtime?.start();
+      else orderRealtime?.stop();
+    });
+    if (existingState.authenticated) orderRealtime.start();
     updater.start();
     syncTimer = setInterval(() => {
       if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     }, 60_000);
+    onlineOrderPollTimer = setInterval(() => {
+      if (!sync.state().authenticated || orderRealtime?.isConnected) return;
+      void sync.refreshOnlineOrders().then((changedIds) => {
+        for (const id of changedIds) pendingRealtimeOrderIds.add(id);
+        flushRealtimeOrderEvents();
+      }).catch(() => undefined);
+    }, 15_000);
     backupTimer = setInterval(() => database && void runAutomaticBackup(database).catch(() => undefined), 6 * 60 * 60 * 1000);
     if (sync.state().authenticated) void sync.sync().catch(() => undefined);
     else void assets.localizeActiveProducts();
@@ -234,7 +271,9 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   if (syncTimer) clearInterval(syncTimer);
+  if (onlineOrderPollTimer) clearInterval(onlineOrderPollTimer);
   if (backupTimer) clearInterval(backupTimer);
   updater?.stop();
+  orderRealtime?.stop();
   database?.close();
 });

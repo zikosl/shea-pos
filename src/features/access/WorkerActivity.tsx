@@ -32,7 +32,8 @@ export function WorkerActivity({ users, canViewInvoices }: { users: Array<{ id: 
     if (from && to && from > to) { setActivity(null); setLoading(false); return; }
     let active = true;
     setLoading(true); setError("");
-    void window.pos.workerActivity({ operatorId: worker || undefined,
+    void window.pos.workerActivity({
+      operatorId: worker || undefined,
       from: from ? new Date(`${from}T00:00:00`).toISOString() : undefined,
       to: to ? new Date(`${to}T23:59:59.999`).toISOString() : undefined,
     }).then((result) => { if (active) setActivity(result as Activity); })

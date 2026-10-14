@@ -21,6 +21,20 @@ async function main() {
     const root = mkdtempSync(path.join(os.tmpdir(), "shea-pos-test-"));
     const database = new PosDatabase(root);
     try {
+      database.db.prepare("INSERT INTO niches(id,name) VALUES (?,?),(?,?)").run(91001, "Test niche A", 91002, "Test niche B");
+      database.db.prepare("INSERT INTO categories(id,niche_id,name) VALUES (?,?,?),(?,?,?)").run(91001, 91001, "Category A", 91002, 91002, "Category B");
+      database.db.prepare("INSERT INTO templates(id,category_id,name) VALUES (?,?,?),(?,?,?)").run(91001, 91001, "Template A", 91002, 91002, "Template B");
+      database.db.prepare("INSERT INTO variants(id,template_id,name) VALUES (?,?,?),(?,?,?),(?,?,?)").run(91001, 91001, "A small", 91002, 91001, "A large", 91003, 91002, "B standard");
+      const nicheA = database.listTemplates({ nicheId: 91001, grouped: true, limit: 50 });
+      const nicheB = database.listTemplates({ nicheId: 91002, grouped: true, limit: 50 });
+      assert.equal(nicheA.total, 1);
+      assert.equal(nicheA.rows.length, 2, "grouped niche results must keep every matching variant");
+      assert.equal(nicheA.rows.every((row: any) => row.template_id === 91001), true);
+      assert.equal(nicheB.total, 1);
+      assert.equal(nicheB.rows.length, 1);
+      assert.equal(nicheB.rows[0].template_id, 91002);
+
+      database.initializeOnlineOrderReadState();
       const access = new LocalAccessService(database);
       assert.equal(access.state().setupRequired, true);
       const ownerState = access.setupOwner({ name: "Owner", username: "owner", secret: "2468" });
@@ -344,9 +358,35 @@ async function main() {
         createdAt: new Date().toISOString(),
         items: [{ quantity: 1, price: 700, product: { customName: "Delivered serum" } }],
       }));
+      assert.deepEqual(database.listUnreadOnlineOrderIds(), [42]);
+      assert.deepEqual(database.markOnlineOrdersSeen([42]), []);
+      assert.deepEqual(database.listUnreadOnlineOrderIds(), []);
       assert.match(previewInvoice(database, "DELIVERY", "42"), /Delivered serum/);
       assert.equal((database.lookupInvoice("shea:invoice:v1:DELIVERY:ORD-42") as any).id, "42");
       assert.equal(database.listInvoices().some((row: any) => row.source === "DELIVERY"), true);
+      const realtimeOrder = {
+        id: 43,
+        status: "REQUESTED",
+        version: 1,
+        source: "DELIVERY",
+        pricingMode: "FIXED",
+        subtotal: 300,
+        discount: 0,
+        appTax: 0,
+        deliveryTax: 0,
+        storeTax: 0,
+        walkInCustomerName: "Realtime customer",
+        updatedAt: new Date().toISOString(),
+        items: [{ id: 1, productId: 2, nameSnapshot: "Realtime item", quantity: 1, price: 300 }],
+        delivery: { status: "PENDING", type: "NORMAL" },
+      };
+      assert.deepEqual(database.upsertOnlineOrders([realtimeOrder]), [43]);
+      assert.deepEqual(database.upsertOnlineOrders([realtimeOrder]), []);
+      const refreshedOrder = database.listOrders().find((row: any) => row.server_id === 43) as any;
+      assert.equal(refreshedOrder.status, "REQUESTED");
+      assert.equal(refreshedOrder.customer_name, "Realtime customer");
+      assert.equal(JSON.parse(refreshedOrder.payload_json).items[0].nameSnapshot, "Realtime item");
+      assert.deepEqual(database.upsertOnlineOrders([{ ...realtimeOrder, status: "PARTNER_ACCEPTED", version: 2 }]), [43]);
       database.db
         .prepare(
           "INSERT INTO outbox(id,operation,aggregate_type,aggregate_id,payload_json,state,created_at,updated_at) VALUES ('blocked-sale','CREATE_SALE','Sale','sale-x',?,'BLOCKED',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",

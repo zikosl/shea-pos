@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   BarChart3,
+  BellRing,
   Boxes,
   Cloud,
   CloudOff,
@@ -21,6 +22,7 @@ import {
   ShoppingBag,
   UsersRound,
   UserRoundCog,
+  X,
 } from "lucide-react";
 import { CatalogRequestsScreen } from "./features/catalog/CatalogRequestsScreen";
 import { InvoicesScreen, OrdersScreen } from "./features/history/HistoryScreens";
@@ -54,6 +56,30 @@ type Page =
   "pos" | "stock" | "barcodes" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
 function isSoftRefreshShortcut(event: KeyboardEvent) {
   return event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r");
+}
+let incomingOrderAudioContext: AudioContext | null = null;
+function playIncomingOrderTone() {
+  try {
+    const context = incomingOrderAudioContext;
+    if (!context || context.state !== "running") return;
+    const now = context.currentTime;
+    [740, 988, 740].forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const start = now + index * 0.2;
+      oscillator.type = "square";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.16, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.17);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.18);
+    });
+  } catch {
+    // A blocked or unavailable audio device must not block the order alert.
+  }
 }
 const emptyState: AppState = {
   authenticated: false,
@@ -97,6 +123,8 @@ export default function App() {
   const [state, setState] = useState<AppState>(emptyState);
   const [ready, setReady] = useState(false);
   const [page, setPage] = useState<Page>("pos");
+  const [pageTransitionLoading, setPageTransitionLoading] = useState(false);
+  const previousPage = useRef(page);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -106,8 +134,55 @@ export default function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [update, setUpdate] = useState<UpdateStatus>({ status: "idle" });
+  const [incomingOrders, setIncomingOrders] = useState<any[]>([]);
+  const [incomingOrderAudioReady, setIncomingOrderAudioReady] = useState(false);
+  const [openOrderId, setOpenOrderId] = useState<number | null>(null);
+  const [unreadOnlineCount, setUnreadOnlineCount] = useState(0);
+  const knownOrderIds = useRef<Set<string> | null>(null);
+  const realtimeOrderIds = useRef(new Set<number>());
+  const alertedOrderIds = useRef(new Set<number>());
+  const handledOrderIds = useRef(new Set<number>());
+  const hasOrdersPermission = state.localAccess.permissions.includes("ORDERS_VIEW");
   const language = (settings.language === "ar" ? "ar" : "en") as Language;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
+
+  useLayoutEffect(() => {
+    if (previousPage.current === page) return;
+    previousPage.current = page;
+
+    const content = document.querySelector(".content");
+    const startedAt = performance.now();
+    let hideTimer: number | undefined;
+    setPageTransitionLoading(true);
+
+    const hasVisibleLoader = () =>
+      Array.from(content?.querySelectorAll<HTMLElement>(".loading-state") ?? [])
+        .some((loader) => loader.getClientRects().length > 0);
+
+    const hideWhenReady = () => {
+      if (hasVisibleLoader() || hideTimer !== undefined) return;
+      const minimumDelay = Math.max(0, 220 - (performance.now() - startedAt));
+      hideTimer = window.setTimeout(() => setPageTransitionLoading(false), minimumDelay);
+    };
+
+    const observer = content ? new MutationObserver(() => {
+      if (hasVisibleLoader()) {
+        if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+        hideTimer = undefined;
+      } else {
+        hideWhenReady();
+      }
+    }) : null;
+    observer?.observe(content!, { childList: true, subtree: true });
+    hideWhenReady();
+
+    const safetyTimer = window.setTimeout(() => setPageTransitionLoading(false), 15_000);
+    return () => {
+      observer?.disconnect();
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+      window.clearTimeout(safetyTimer);
+    };
+  }, [page]);
 
   const refreshState = async () =>
     setState((await window.pos.getState()) as AppState);
@@ -182,6 +257,32 @@ export default function App() {
     setNotice("");
   }, [language]);
   useEffect(() => {
+    const unlockAudio = () => {
+      try {
+        incomingOrderAudioContext ??= new window.AudioContext();
+        void incomingOrderAudioContext.resume().then(() => {
+          setIncomingOrderAudioReady(incomingOrderAudioContext?.state === "running");
+          window.removeEventListener("pointerdown", unlockAudio);
+          window.removeEventListener("keydown", unlockAudio);
+        }).catch(() => undefined);
+      } catch {
+        // The visible alert and native notification remain available without audio.
+      }
+    };
+    window.addEventListener("pointerdown", unlockAudio);
+    window.addEventListener("keydown", unlockAudio);
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+    };
+  }, []);
+  useEffect(() => {
+    if (!incomingOrders.length || !incomingOrderAudioReady) return;
+    playIncomingOrderTone();
+    const timer = window.setInterval(playIncomingOrderTone, 2400);
+    return () => window.clearInterval(timer);
+  }, [incomingOrders.length, incomingOrderAudioReady]);
+  useEffect(() => {
     if (!shortcutsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -191,6 +292,83 @@ export default function App() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [shortcutsOpen]);
+  useEffect(() => {
+    if (!state.authenticated || !state.localAccess.authenticated || !hasOrdersPermission) {
+      knownOrderIds.current = null;
+      realtimeOrderIds.current.clear();
+      setIncomingOrders([]);
+      setUnreadOnlineCount(0);
+      return;
+    }
+    let active = true;
+    const refreshOrders = async (detectNew: boolean) => {
+      const rows = await window.pos.listOrders() as any[];
+      if (!active) return;
+      const unreadIds = await window.pos.listUnreadOnlineOrderIds();
+      if (active) setUnreadOnlineCount(unreadIds.length);
+      const currentIds = new Set(rows.map((row) => String(row.server_id)));
+      const realtimeOrderUpdates = rows.filter((row) => realtimeOrderIds.current.has(Number(row.server_id)));
+      for (const row of realtimeOrderUpdates) realtimeOrderIds.current.delete(Number(row.server_id));
+      if (knownOrderIds.current === null) {
+        knownOrderIds.current = currentIds;
+      }
+      const arrivingOrders = [
+        ...realtimeOrderUpdates,
+        ...(detectNew ? rows.filter((row) => !knownOrderIds.current?.has(String(row.server_id))) : []),
+      ].filter((row, index, all) =>
+        row.delivery_status === "PENDING" && row.status === "REQUESTED" &&
+        all.findIndex((candidate) => candidate.server_id === row.server_id) === index
+      );
+      knownOrderIds.current = currentIds;
+      for (const arriving of arrivingOrders) {
+        const id = Number(arriving.server_id);
+        if (handledOrderIds.current.has(id)) continue;
+        setIncomingOrders((current) => current.some((row) => Number(row.server_id) === id)
+          ? current.map((row) => Number(row.server_id) === id ? arriving : row)
+          : [...current, arriving]);
+        if (!alertedOrderIds.current.has(id)) {
+          alertedOrderIds.current.add(id);
+          if (alertedOrderIds.current.size > 1000) alertedOrderIds.current.delete(alertedOrderIds.current.values().next().value!);
+          void window.pos.notifyNewOrder({
+            id,
+            title: t("newOnlineOrder"),
+            body: `#${arriving.server_id}`,
+          }).catch(() => undefined);
+        }
+      }
+    };
+    const unsubscribeRealtime = window.pos.onRealtimeOrder((id) => {
+      realtimeOrderIds.current.add(id);
+      void refreshOrders(true).catch(() => undefined);
+    });
+    void refreshOrders(false).catch(() => undefined);
+    const unsubscribe = window.pos.onDataSyncComplete(() => void refreshOrders(true).catch(() => undefined));
+    const unsubscribeOpen = window.pos.onOpenOrderNotification((id) => {
+      handledOrderIds.current.add(id);
+      if (handledOrderIds.current.size > 1000) handledOrderIds.current.delete(handledOrderIds.current.values().next().value!);
+      setIncomingOrders((current) => current.filter((row) => Number(row.server_id) !== id));
+      setOpenOrderId(id);
+      setPage("orders");
+    });
+    return () => {
+      active = false;
+      unsubscribeRealtime();
+      unsubscribe();
+      unsubscribeOpen();
+    };
+  }, [state.authenticated, state.localAccess.authenticated, hasOrdersPermission, language]);
+
+  function dismissIncomingOrder(id: number) {
+    handledOrderIds.current.add(id);
+    if (handledOrderIds.current.size > 1000) handledOrderIds.current.delete(handledOrderIds.current.values().next().value!);
+    setIncomingOrders((current) => current.filter((row) => Number(row.server_id) !== id));
+  }
+
+  function openIncomingOrder(id: number) {
+    dismissIncomingOrder(id);
+    setOpenOrderId(id);
+    setPage("orders");
+  }
 
   async function sync() {
     if (busy) return;
@@ -340,7 +518,7 @@ export default function App() {
     { id: "barcodes", label: t("barcodeManager"), icon: ScanLine, permission: "INVENTORY_MANAGE" },
     { id: "entries", label: t("stockEntries"), icon: PackagePlus, permission: "STOCK_RECEIVE" },
     ...(state.capabilities.includes("CUSTOM_ORDERS") ? [{ id: "gifts" as const, label: t("customOrders"), icon: Gift, permission: "CUSTOM_ORDERS_VIEW" as const }] : []),
-    { id: "orders", label: t("orders"), icon: FileClock, permission: "ORDERS_VIEW" },
+    { id: "orders", label: t("orders1"), icon: FileClock, permission: "ORDERS_VIEW" },
     { id: "sales", label: t("invoices"), icon: ReceiptText, permission: "INVOICES_VIEW" },
     { id: "reports", label: t("reports"), icon: BarChart3, permission: "REPORTS_VIEW" },
     { id: "requests", label: t("requests"), icon: PackagePlus, permission: "CATALOG_REQUEST" },
@@ -514,7 +692,7 @@ export default function App() {
                     Alt+{navigationKeys[item.id]}
                   </kbd>
                 ) : null}
-                {item.id === "orders" && <i />}
+                {item.id === "orders" && unreadOnlineCount > 0 ? <b className="nav-order-count">{unreadOnlineCount > 99 ? "99+" : unreadOnlineCount}</b> : null}
               </button>
             ))}
           </nav>
@@ -608,7 +786,7 @@ export default function App() {
               <button onClick={() => setNotice("")}>{t("close")}</button>
             </div>
           )}
-          <section className="content">
+          <section className="content" aria-busy={pageTransitionLoading}>
             {page === "pos" && (
               <PosScreen onNotice={setNotice} onChanged={refreshState} />
             )}
@@ -616,7 +794,7 @@ export default function App() {
             {page === "barcodes" && <BarcodeManagerScreen onNotice={setNotice} onChanged={refreshState} gatewayMode={settings.deploymentMode === "multi"} />}
             {page === "entries" && <StockEntriesScreen onNotice={setNotice} settings={settings} />}
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
-            {page === "orders" && <OrdersScreen />}
+            {page === "orders" && <OrdersScreen openOrderId={openOrderId} onOpenedOrder={() => setOpenOrderId(null)} onUnreadOrdersChanged={setUnreadOnlineCount} />}
             {page === "sales" && (
               <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} onGoToPos={() => setPage("pos")} />
             )}
@@ -634,6 +812,24 @@ export default function App() {
             )}
           </section>
         </main>
+        {pageTransitionLoading ? (
+          <div className="page-transition-loader" role="status" aria-live="polite">
+            <LoaderCircle className="spin" aria-hidden="true" />
+            <span>{t("loadingData")}</span>
+          </div>
+        ) : null}
+        {incomingOrders[0] && hasOrdersPermission ? (
+          <aside className="incoming-order-alert" role="alert" aria-live="assertive">
+            <div className="incoming-order-icon"><BellRing size={19} /></div>
+            <div className="incoming-order-copy">
+              <strong>{t("newOnlineOrder")}</strong>
+              <span>#{incomingOrders[0].server_id} · {incomingOrders[0].customer_name || t("customer")}</span>
+              {incomingOrders.length > 1 ? <small>{t("moreOrdersWaiting").replace("{count}", String(incomingOrders.length - 1))}</small> : null}
+            </div>
+            <button className="button primary" onClick={() => openIncomingOrder(Number(incomingOrders[0].server_id))}>{t("viewOrder")}</button>
+            <button className="icon-button" aria-label={t("dismissAlert")} title={t("dismissAlert")} onClick={() => dismissIncomingOrder(Number(incomingOrders[0].server_id))}><X size={17} /></button>
+          </aside>
+        ) : null}
         {switchingOperator ? (
           <div className="operator-switch-layer">
             <LocalAccessScreen
