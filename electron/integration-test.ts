@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { safeStorage } from "electron";
 import { PosDatabase } from "./database";
+import { barcodeCandidates, barcodeMatches, barcodeSearchTerms } from "./domain/barcode";
 import { LocalAccessService } from "./access";
 import { ProductAssetService } from "./assets";
 import {
+  cashDrawerKickCommand,
   printOptions,
   previewInvoice,
   previewPriceLabel,
@@ -15,6 +18,12 @@ import {
 } from "./printer";
 
 async function main() {
+    assert.deepEqual([...cashDrawerKickCommand(2)], [0x1b, 0x70, 0x00, 0x0c, 0x7d]);
+    assert.deepEqual([...cashDrawerKickCommand(5)], [0x1b, 0x70, 0x01, 0x0c, 0x7d]);
+    assert.deepEqual(barcodeCandidates("]C10105012345678900\u001d17270101"), ["05012345678900", "010501234567890017270101"]);
+    assert.equal(barcodeMatches("0501234567890", "00501234567890"), true);
+    assert.equal(barcodeSearchTerms("00501234567890").includes("0501234567890"), true);
+    assert.equal(barcodeMatches("SKU-123", "sku-123"), true);
     assert.equal(printOptions().usePrinterDefaultPageSize, true);
     assert.equal(printOptions("Receipt printer").deviceName, "Receipt printer");
     assert.deepEqual(printOptions("Label printer", { width: 50_000, height: 30_000 }).pageSize, { width: 50_000, height: 30_000 });
@@ -57,6 +66,16 @@ async function main() {
       assert.throws(() => access.login("owner", "2468"), /Invalid local credentials/);
       access.login("owner", "8642");
       assert.equal(access.listAudit().length > 0, true);
+      if (safeStorage?.isEncryptionAvailable?.()) {
+        const rememberingAccess = new LocalAccessService(database);
+        const rememberedState = rememberingAccess.login("owner", "8642", true);
+        assert.equal(rememberedState.remembered, true);
+        const restoredAccess = new LocalAccessService(database);
+        assert.equal(restoredAccess.restoreRememberedSession(), true);
+        assert.equal(restoredAccess.state().authenticated, true);
+        restoredAccess.logout();
+        assert.equal(restoredAccess.state().remembered, false, "explicit local sign-out clears remembered session");
+      }
       database.setSetting("device", JSON.stringify({ id: "test-device" }));
       database.setSetting(
         "partner",
@@ -86,6 +105,14 @@ async function main() {
       );
       insert.run("tracked", 1, "Tracked item", 100, 60, 5, "TRACKED");
       insert.run("unlimited", 2, "Service item", 50, 10, 0, "UNLIMITED");
+      assert.throws(() => database.checkout({
+        paymentMethod: "CASH",
+        lines: [
+          { productLocalId: "tracked", quantity: 4 },
+          { productLocalId: "tracked", quantity: 4 },
+        ],
+      }), /DUPLICATE_PRODUCT_LINE/);
+      assert.equal((database.getProductByLocalId("tracked") as any).stock, 5);
       const assigned = database.updateProduct({ productLocalId: "tracked", vendorBarcode: "SHEA-TEST-001" }) as any;
       assert.equal(assigned.barcode, "SHEA-TEST-001");
       assert.equal((database.listInventory({ search: "SHEA-TEST-001" }) as any[])[0].local_id, "tracked");
@@ -475,6 +502,11 @@ async function main() {
       const backupPath = await database.createBackup(root);
       assert.equal(existsSync(path.join(backupPath, "shea-pos.sqlite")), true);
       assert.equal(existsSync(path.join(backupPath, "assets", "products", "serum.webp")), true);
+      const autoClosedSession = database.closeCashSession({ note: "SYSTEM_AUTO_CLOSE_NO_PHYSICAL_COUNT" }) as any;
+      assert.equal(autoClosedSession.status, "CLOSED");
+      assert.equal(autoClosedSession.counted_cash, null, "automatic close must not pretend a physical cash count was taken");
+      assert.equal(autoClosedSession.difference, null, "automatic close must not report an unverified cash variance");
+      assert.equal(database.getCashSession(), null, "automatic close leaves the next caisse closed");
       console.log("Shea POS core integration checks passed");
     } finally {
       database.close();

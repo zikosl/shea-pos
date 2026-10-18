@@ -21,6 +21,7 @@ export type AppState = {
   localAccess: {
     setupRequired: boolean;
     authenticated: boolean;
+    remembered: boolean;
     user: {
       id: string;
       name: string;

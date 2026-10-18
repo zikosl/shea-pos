@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Search, ScanLine, WandSparkles } from "lucide-react";
 import { localizeError, useI18n } from "../../i18n";
+import { barcodeCandidates, barcodeMatches, barcodeSearchTerms } from "../../../electron/domain/barcode";
 import type { Product } from "../../types";
 
 type Step = "scan" | "search" | "variant" | "confirm" | "saved";
@@ -40,16 +41,24 @@ export function BarcodeManagerScreen({ onNotice, onChanged, gatewayMode }: {
   const variantOf = (product: Product) => product.variant_name || product.sku || (language === "ar" ? "افتراضي" : "Default");
 
   async function check(value: string) {
-    const normalized = value.trim();
+    const candidates = barcodeCandidates(value);
+    const normalized = candidates[0] ?? "";
     setError("");
-    if (!normalized || normalized.length > 80 || !/^[A-Za-z0-9._:-]+$/.test(normalized)) {
+    if (!normalized || value.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(normalized)) {
       setError(t("barcodeInvalid"));
       return;
     }
     setBusy(true);
     try {
-      const rows = await window.pos.listInventory({ search: normalized, limit: 250 }) as Product[];
-      const match = rows.find((row) => [row.barcode, row.sku].some((item) => item?.toUpperCase() === normalized.toUpperCase()));
+      const rows = new Map<string, Product>();
+      for (const term of barcodeSearchTerms(value)) {
+        const matches = await window.pos.listInventory({ search: term, limit: 250 }) as Product[];
+        for (const row of matches) rows.set(row.local_id, row);
+      }
+      const match = [...rows.values()].find((row) =>
+        Boolean(row.barcode && barcodeMatches(row.barcode, value)) ||
+        Boolean(row.sku && row.sku.toUpperCase() === normalized.toUpperCase()),
+      );
       setCode(normalized);
       setExisting(match ?? null);
       setSelected(null);

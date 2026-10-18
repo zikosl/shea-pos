@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ArchiveRestore,
@@ -19,10 +19,17 @@ import { ErrorState, LoadingState } from "../../components/AsyncState";
 import { Pagination } from "../../components/Pagination";
 import { localeFor, localizeError, useI18n } from "../../i18n";
 import { money } from "../../shared/format";
+import { barcodeMatches, barcodeSearchTerms } from "../../../electron/domain/barcode";
 import type { CartLine, Catalog, Product } from "../../types";
 
-const PAGE_SIZE = 40;
+const DEFAULT_PAGE_SIZE = 12;
+const MAX_PAGE_SIZE = 249;
 export const HOLD_SALE_SHORTCUT_EVENT = "shea-pos:hold-sale";
+export const POS_PAGE_SHORTCUT_EVENT = "shea-pos:page-products";
+export const FOCUS_TENDERED_AMOUNT_EVENT = "shea-pos:focus-tendered-amount";
+export const SAFE_POS_EXIT_REQUEST_EVENT = "shea-pos:safe-exit-request";
+export const COMPLETE_SALE_SHORTCUT_EVENT = "shea-pos:complete-sale";
+export const CASH_SESSION_UPDATED_EVENT = "shea-pos:cash-session-updated";
 const initials = (name: string) =>
   name
     .trim()
@@ -41,9 +48,11 @@ function ProductThumbnail({ image }: { image?: string }) {
 export function PosScreen({
   onNotice,
   onChanged,
+  canManageRegister,
 }: {
   onNotice: (message: string) => void;
   onChanged: () => Promise<void>;
+  canManageRegister: boolean;
 }) {
   const { t, language } = useI18n();
   const [products, setProducts] = useState<Product[]>([]),
@@ -55,21 +64,32 @@ export function PosScreen({
     [nicheId, setNicheId] = useState<number>(),
     [offset, setOffset] = useState(0),
     [busy, setBusy] = useState(false);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [cashSession, setCashSession] = useState<any>(null),
     [showRegister, setShowRegister] = useState(false),
     [completedSale, setCompletedSale] = useState<any>(null);
+  const [registerBusy, setRegisterBusy] = useState(false);
+  const registerPromptChecked = useRef(false);
   const [amountTendered, setAmountTendered] = useState("");
   const [priceProduct, setPriceProduct] = useState<Product | null>(null);
   const [heldCarts, setHeldCarts] = useState<any[]>([]);
   const [showHeldCarts, setShowHeldCarts] = useState(false);
   const [holdingSale, setHoldingSale] = useState(false);
+  const [printingReceipt, setPrintingReceipt] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [hasNextPage, setHasNextPage] = useState(false);
+  const productGridRef = useRef<HTMLDivElement>(null);
+  const pageSizeRef = useRef(DEFAULT_PAGE_SIZE);
+  const loadRequestId = useRef(0);
   const searchRef = useRef<HTMLInputElement>(null);
+  const amountTenderedRef = useRef<HTMLInputElement>(null);
+  const checkoutLock = useRef(false);
+  const printingLock = useRef(false);
 
-  const load = async () => {
-    setLoading(true);
+  const load = useCallback(async (keepCurrentResults = false) => {
+    const requestId = ++loadRequestId.current;
+    if (!keepCurrentResults) setLoading(true);
     setLoadError("");
     try {
       const [productRows, catalogValue, session] = await Promise.all([
@@ -78,26 +98,66 @@ export function PosScreen({
           categoryId,
           nicheId,
           // One extra result makes the Next state accurate without a count query.
-          limit: PAGE_SIZE + 1,
+          limit: pageSize + 1,
           offset,
         }),
         window.pos.listCatalog(),
         window.pos.getCashSession(),
       ]);
+      if (requestId !== loadRequestId.current) return;
       const pageRows = productRows as Product[];
-      setProducts(pageRows.slice(0, PAGE_SIZE));
-      setHasNextPage(pageRows.length > PAGE_SIZE);
+      setProducts(pageRows.slice(0, pageSize));
+      setHasNextPage(pageRows.length > pageSize);
       setCatalog(catalogValue as Catalog);
       setCashSession(session);
+      if (!registerPromptChecked.current) {
+        registerPromptChecked.current = true;
+        if (canManageRegister && !session) setShowRegister(true);
+      }
     } catch (value) {
-      setLoadError(localizeError(language, value));
+      if (requestId === loadRequestId.current) setLoadError(localizeError(language, value));
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
-  };
+  }, [canManageRegister, categoryId, language, nicheId, offset, pageSize, search]);
   useEffect(() => {
     void load();
-  }, [search, categoryId, nicheId, offset]);
+  }, [load]);
+  useEffect(() => window.pos.onDataSyncComplete(() => void load(true)), [load]);
+  useEffect(() => {
+    if (loading || loadError) return;
+    const grid = productGridRef.current;
+    if (!grid) return;
+
+    const measurePageCapacity = () => {
+      const style = window.getComputedStyle(grid);
+      const columns = style.gridTemplateColumns.split(/\s+/).filter(Boolean).length;
+      const rowHeight = Number.parseFloat(style.gridAutoRows);
+      const rowGap = Number.parseFloat(style.rowGap) || 0;
+      if (!columns || !grid.clientHeight || !rowHeight) return;
+      const rows = Math.max(1, Math.floor((grid.clientHeight + rowGap) / (rowHeight + rowGap)));
+      const capacity = Math.min(columns * rows, MAX_PAGE_SIZE);
+      if (capacity === pageSizeRef.current) return;
+      pageSizeRef.current = capacity;
+      setPageSize(capacity);
+      setOffset(0);
+    };
+
+    measurePageCapacity();
+    const observer = new ResizeObserver(measurePageCapacity);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [loading, loadError]);
+  useEffect(() => {
+    const updateSession = () => {
+      void window.pos.getCashSession().then((session) => {
+        setCashSession(session);
+        if (!session) setShowRegister(false);
+      }).catch(() => undefined);
+    };
+    window.addEventListener(CASH_SESSION_UPDATED_EVENT, updateSession);
+    return () => window.removeEventListener(CASH_SESSION_UPDATED_EVENT, updateSession);
+  }, []);
   const visibleCategories = useMemo(
     () => catalog?.categories.filter((category) => !nicheId || category.niche_id === nicheId) ?? [],
     [catalog, nicheId],
@@ -115,8 +175,7 @@ export function PosScreen({
   );
   const tendered = Number(amountTendered || 0),
     change = Math.max(0, tendered - total);
-  const cashOptions = useMemo(() => suggestedCash(total), [total]);
-  useEffect(() => setAmountTendered(total ? String(total) : ""), [total]);
+  useEffect(() => setAmountTendered(""), [total]);
   function add(product: Product, unitPrice?: number) {
     if (product.price_on_request && unitPrice === undefined) {
       setPriceProduct(product);
@@ -139,14 +198,19 @@ export function PosScreen({
       );
     });
   }
-  async function scanProduct() {
-    const reference = search.trim();
-    if (!reference) return;
+  async function scanProduct(rawValue = search) {
+    const candidates = barcodeSearchTerms(rawValue);
+    if (!candidates.length) return;
     try {
-      const matches = await window.pos.listProducts({ search: reference, limit: 20, offset: 0 }) as Product[];
-      const exact = matches.find((product) =>
-        [product.barcode, product.sku].some((value) => value && value.toLowerCase() === reference.toLowerCase()),
-      );
+      let exact: Product | undefined;
+      for (const candidate of candidates) {
+        const matches = await window.pos.listProducts({ search: candidate, limit: 250, offset: 0 }) as Product[];
+        exact = matches.find((product) => {
+          return Boolean(product.barcode && barcodeMatches(product.barcode, candidate)) ||
+            Boolean(product.sku && product.sku.toLowerCase() === candidate.toLowerCase());
+        });
+        if (exact) break;
+      }
       if (!exact) return onNotice(t("barcodeNotFound"));
       add(exact);
       setSearch("");
@@ -157,7 +221,7 @@ export function PosScreen({
     }
   }
   async function holdCurrentCart() {
-    if (!cart.length || holdingSale) return;
+    if (!cart.length || holdingSale) return false;
     setHoldingSale(true);
     try {
       await window.pos.holdCart({
@@ -168,8 +232,10 @@ export function PosScreen({
       setCustomerName("");
       onNotice(t("saleHeld"));
       searchRef.current?.focus();
+      return true;
     } catch (error) {
       onNotice(localizeError(language, error));
+      return false;
     } finally {
       setHoldingSale(false);
     }
@@ -178,7 +244,36 @@ export function PosScreen({
     const holdSale = () => void holdCurrentCart();
     window.addEventListener(HOLD_SALE_SHORTCUT_EVENT, holdSale);
     return () => window.removeEventListener(HOLD_SALE_SHORTCUT_EVENT, holdSale);
-  });
+  }, [cart, customerName, holdingSale, language]);
+  useEffect(() => {
+    const changeProductPage = (event: Event) => {
+      if (loading || loadError) return;
+      const direction = (event as CustomEvent<{ direction?: "next" | "previous" }>).detail?.direction;
+      if (direction === "next" && hasNextPage) setOffset((current) => current + pageSize);
+      if (direction === "previous" && offset > 0) setOffset((current) => Math.max(0, current - pageSize));
+    };
+    window.addEventListener(POS_PAGE_SHORTCUT_EVENT, changeProductPage);
+    return () => window.removeEventListener(POS_PAGE_SHORTCUT_EVENT, changeProductPage);
+  }, [hasNextPage, loadError, loading, offset, pageSize]);
+  useEffect(() => {
+    const focusTenderedAmount = () => amountTenderedRef.current?.focus();
+    window.addEventListener(FOCUS_TENDERED_AMOUNT_EVENT, focusTenderedAmount);
+    return () => window.removeEventListener(FOCUS_TENDERED_AMOUNT_EVENT, focusTenderedAmount);
+  }, []);
+  useEffect(() => {
+    const requestLauncher = (event: Event) => {
+      const complete = (event as CustomEvent<{ complete?: () => void }>).detail?.complete;
+      if (!complete) return;
+      if (!cart.length) {
+        complete();
+        return;
+      }
+      if (!window.confirm(t("holdBeforeNavigationConfirm"))) return;
+      void holdCurrentCart().then((held) => { if (held) complete(); });
+    };
+    window.addEventListener(SAFE_POS_EXIT_REQUEST_EVENT, requestLauncher);
+    return () => window.removeEventListener(SAFE_POS_EXIT_REQUEST_EVENT, requestLauncher);
+  }, [cart, customerName, holdingSale, language]);
   async function openHeldCarts() {
     try {
       setHeldCarts(await window.pos.listHeldCarts() as any[]);
@@ -212,7 +307,10 @@ export function PosScreen({
     );
   }
   async function checkout() {
+    if (checkoutLock.current || busy) return;
     if (!cashSession) return setShowRegister(true);
+    if (!cart.length || tendered < total) return;
+    checkoutLock.current = true;
     setBusy(true);
     try {
       const sale = await window.pos.checkout({
@@ -225,6 +323,7 @@ export function PosScreen({
           unitPrice: line.unitPrice,
         })),
       });
+      if ((sale as any).cashDrawerError) onNotice(localizeError(language, (sale as any).cashDrawerError));
       setCompletedSale(sale);
       setCart([]);
       setCustomerName("");
@@ -233,11 +332,57 @@ export function PosScreen({
     } catch (error) {
       onNotice(localizeError(language, error));
     } finally {
+      checkoutLock.current = false;
       setBusy(false);
     }
   }
+  const startNextSale = useCallback(() => {
+    setCompletedSale(null);
+    setSearch("");
+    setOffset(0);
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+  }, []);
+  const printAndStartNextSale = useCallback(async () => {
+    if (!completedSale || printingLock.current) return;
+    printingLock.current = true;
+    setPrintingReceipt(true);
+    try {
+      await window.pos.printReceipt({ saleId: completedSale.id });
+      startNextSale();
+    } catch (error) {
+      onNotice(localizeError(language, error));
+    } finally {
+      printingLock.current = false;
+      setPrintingReceipt(false);
+    }
+  }, [completedSale, language, onNotice, startNextSale]);
+  useEffect(() => {
+    const completeSale = () => void checkout();
+    window.addEventListener(COMPLETE_SALE_SHORTCUT_EVENT, completeSale);
+    return () => window.removeEventListener(COMPLETE_SALE_SHORTCUT_EVENT, completeSale);
+  });
+  useEffect(() => {
+    if (!completedSale) return;
+    const handleCompletedSaleKeys = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (event.key === "F9") {
+        event.preventDefault();
+        event.stopPropagation();
+        void printAndStartNextSale();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        startNextSale();
+      }
+    };
+    window.addEventListener("keydown", handleCompletedSaleKeys);
+    return () => window.removeEventListener("keydown", handleCompletedSaleKeys);
+  }, [completedSale, printAndStartNextSale, startNextSale]);
   const localized = (row: any) =>
     language === "ar" && row.name_ar ? row.name_ar : row.name;
+  const dismissRegisterPrompt = () => {
+    setShowRegister(false);
+  };
 
   return (
     <>
@@ -261,9 +406,9 @@ export function PosScreen({
             >
               <i />
               {cashSession ? t("registerReady") : t("cashRequired")}
-              {!cashSession && (
-                <button onClick={() => setShowRegister(true)}>
-                  {t("openRegister")}
+              {canManageRegister && (
+                <button type="button" onClick={() => setShowRegister(true)}>
+                  {cashSession ? t("manageRegister") : t("openRegister")}
                 </button>
               )}
             </div>
@@ -321,7 +466,7 @@ export function PosScreen({
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    void scanProduct();
+                    void scanProduct(event.currentTarget.value);
                   }
                 }}
                 placeholder={t("searchProducts")}
@@ -357,7 +502,7 @@ export function PosScreen({
               onRetry={() => void load()}
             />
           ) : (
-            <div className="product-grid pos-product-grid">
+            <div className="product-grid pos-product-grid" ref={productGridRef}>
               {products.map((product) => {
                 const unavailable =
                   product.inventory_policy === "TRACKED" && product.stock <= 0;
@@ -414,10 +559,10 @@ export function PosScreen({
           {!loading && !loadError && (
             <Pagination
               className="pos-pagination"
-              page={offset / PAGE_SIZE}
-              pageSize={PAGE_SIZE}
+              page={Math.floor(offset / pageSize)}
+              pageSize={pageSize}
               hasNext={hasNextPage}
-              onPageChange={(page) => setOffset(page * PAGE_SIZE)}
+              onPageChange={(page) => setOffset(page * pageSize)}
             />
           )}
         </section>
@@ -475,6 +620,9 @@ export function PosScreen({
                   </div>
                   <div className="line-controls">
                     <button
+                      type="button"
+                      aria-label={`${t("decreaseQuantity")} ${localized(line.product)}`}
+                      title={t("decreaseQuantity")}
                       onClick={() =>
                         changeQuantity(line.product.local_id, line.quantity - 1)
                       }
@@ -483,6 +631,9 @@ export function PosScreen({
                     </button>
                     <span>{line.quantity}</span>
                     <button
+                      type="button"
+                      aria-label={`${t("increaseQuantity")} ${localized(line.product)}`}
+                      title={t("increaseQuantity")}
                       onClick={() =>
                         changeQuantity(line.product.local_id, line.quantity + 1)
                       }
@@ -491,8 +642,10 @@ export function PosScreen({
                     </button>
                   </div>
                   <button
+                    type="button"
                     className="line-remove"
                     aria-label={t("remove")}
+                    title={t("remove")}
                     onClick={() => changeQuantity(line.product.local_id, 0)}
                   >
                     <X />
@@ -507,28 +660,20 @@ export function PosScreen({
               <strong>{money(total)}</strong>
             </div>
             <div className="cash-label">
-              <span>{t("amountTendered")}</span>
+              <span>{t("amountTendered")} <kbd aria-hidden="true">F6</kbd></span>
               <small>{t("cashPayment")}</small>
-            </div>
-            <div className="cash-options">
-              {cashOptions.map((amount, index) => (
-                <button
-                  key={amount}
-                  className={tendered === amount ? "active" : ""}
-                  onClick={() => setAmountTendered(String(amount))}
-                >
-                  {index === 0 ? t("exact") : money(amount)}
-                </button>
-              ))}
             </div>
             <label className="cash-input">
               <CircleDollarSign />
               <input
+                ref={amountTenderedRef}
                 type="number"
                 min={total}
                 step="1"
                 value={amountTendered}
                 onChange={(event) => setAmountTendered(event.target.value)}
+                aria-keyshortcuts="F6"
+                title={`${t("amountTendered")} (F6)`}
               />
               <span>DZD</span>
             </label>
@@ -538,6 +683,8 @@ export function PosScreen({
             </div>
             <button
               className="complete-sale"
+              aria-keyshortcuts="F10"
+              title={`${t("completeSale")} (F10)`}
               disabled={
                 !cart.length || !cashSession || tendered < total || busy
               }
@@ -546,60 +693,88 @@ export function PosScreen({
               {busy ? <LoaderCircle className="spin" /> : <Check />}
               <span>{t("completeSale")}</span>
               <b>{money(total)}</b>
+              <kbd aria-hidden="true">F10</kbd>
             </button>
           </div>
         </aside>
       </div>
       {showRegister && (
-        <Modal onClose={() => setShowRegister(false)}>
-          <form
-            className="register-dialog"
-            onSubmit={async (event) => {
+        <Modal onClose={() => cashSession && dismissRegisterPrompt()}>
+          {cashSession ? (
+            <div className="register-dialog">
+              <span className="dialog-icon"><CircleDollarSign /></span>
+              <h2>{t("registerSessionActive")}</h2>
+              <p>{t("registerSessionActiveHelp")}</p>
+              <div className="register-session-summary">
+                <span><small>{t("openingCash")}</small><strong>{money(cashSession.opening_amount)}</strong></span>
+                <span><small>{t("expectedCash")}</small><strong>{money(cashSession.expected_cash)}</strong></span>
+              </div>
+              <small className="register-session-date">{t("sessionStarted")}: {new Date(cashSession.opened_at).toLocaleString(localeFor(language))}</small>
+              {canManageRegister ? <form onSubmit={async (event) => {
+                event.preventDefault();
+                const countedCash = Number(new FormData(event.currentTarget).get("counted"));
+                setRegisterBusy(true);
+                try {
+                  await window.pos.closeCashSession({ countedCash });
+                  setCashSession(null);
+                  setShowRegister(false);
+                  onNotice(t("registerClosed"));
+                } catch (error) {
+                  onNotice(localizeError(language, error));
+                } finally {
+                  setRegisterBusy(false);
+                }
+              }}>
+                <label>
+                  {t("countedCash")}
+                  <div className="money-field">
+                    <input name="counted" type="number" min="0" step="1" defaultValue="0" required />
+                    <span>DZD</span>
+                  </div>
+                </label>
+                <div className="dialog-actions">
+                  <button type="button" className="button secondary" onClick={dismissRegisterPrompt}>{t("continueRegister")}</button>
+                  <button className="button danger" disabled={registerBusy}>
+                    {registerBusy ? <LoaderCircle className="spin" /> : null}
+                    {t("closeRegister")}
+                  </button>
+                </div>
+              </form> : <div className="dialog-actions register-session-continue"><button type="button" className="button primary" onClick={dismissRegisterPrompt}>{t("continueRegister")}</button></div>}
+            </div>
+          ) : (
+            <form className="register-dialog" onSubmit={async (event) => {
               event.preventDefault();
-              const form = new FormData(event.currentTarget);
+              const openingAmount = Number(new FormData(event.currentTarget).get("opening"));
+              setRegisterBusy(true);
               try {
-                setCashSession(
-                  await window.pos.openCashSession({
-                    openingAmount: Number(form.get("opening")),
-                  }),
-                );
+                setCashSession(await window.pos.openCashSession({ openingAmount }));
                 setShowRegister(false);
                 onNotice(t("registerOpen"));
               } catch (error) {
                 onNotice(localizeError(language, error));
+              } finally {
+                setRegisterBusy(false);
               }
-            }}
-          >
-            <span className="dialog-icon">
-              <CircleDollarSign />
-            </span>
-            <h2>{t("openRegisterTitle")}</h2>
-            <p>{t("openRegisterHelp")}</p>
-            <label>
-              {t("openingCash")}
-              <div className="money-field">
-                <input
-                  name="opening"
-                  type="number"
-                  min="0"
-                  defaultValue="0"
-                  autoFocus
-                  required
-                />
-                <span>DZD</span>
+            }}>
+              <span className="dialog-icon"><CircleDollarSign /></span>
+              <h2>{t("openRegisterTitle")}</h2>
+              <p>{t("openRegisterHelp")}</p>
+              <label>
+                {t("openingCash")}
+                <div className="money-field">
+                  <input name="opening" type="number" min="0" step="1" defaultValue="0" autoFocus required />
+                  <span>DZD</span>
+                </div>
+              </label>
+              <div className="dialog-actions">
+                <button type="button" className="button secondary" onClick={() => setShowRegister(false)}>{t("cancel")}</button>
+                <button className="button primary" disabled={registerBusy}>
+                  {registerBusy ? <LoaderCircle className="spin" /> : null}
+                  {t("openRegister")}
+                </button>
               </div>
-            </label>
-            <div className="dialog-actions">
-              <button
-                type="button"
-                className="button secondary"
-                onClick={() => setShowRegister(false)}
-              >
-                {t("cancel")}
-              </button>
-              <button className="button primary">{t("openRegister")}</button>
-            </div>
-          </form>
+            </form>
+          )}
         </Modal>
       )}
       {priceProduct && (
@@ -639,23 +814,22 @@ export function PosScreen({
             <div className="dialog-actions">
               <button
                 className="button secondary"
-                onClick={() =>
-                  window.pos
-                    .printReceipt({ saleId: completedSale.id })
-                    .catch((error) => onNotice(localizeError(language, error)))
-                }
+                aria-keyshortcuts="F9"
+                disabled={printingReceipt}
+                onClick={() => void printAndStartNextSale()}
               >
-                <Printer />
+                {printingReceipt ? <LoaderCircle className="spin" /> : <Printer />}
                 {t("printReceipt")}
+                <kbd aria-hidden="true">F9</kbd>
               </button>
               <button
                 className="button primary"
-                onClick={() => {
-                  setCompletedSale(null);
-                  searchRef.current?.focus();
-                }}
+                aria-keyshortcuts="Escape"
+                title={`${t("newSaleAction")} (Esc)`}
+                onClick={startNextSale}
               >
                 {t("newSaleAction")}
+                <kbd aria-hidden="true">Esc</kbd>
               </button>
             </div>
           </div>
@@ -663,17 +837,6 @@ export function PosScreen({
       )}
     </>
   );
-}
-
-function suggestedCash(total: number) {
-  if (!total) return [];
-  const values = [total];
-  for (const denomination of [50, 100, 200, 500, 1000, 2000, 5000]) {
-    const rounded = Math.ceil(total / denomination) * denomination;
-    const candidate = rounded === total ? total + denomination : rounded;
-    if (!values.includes(candidate)) values.push(candidate);
-  }
-  return values.slice(0, 5);
 }
 
 function Modal({

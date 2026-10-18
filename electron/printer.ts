@@ -1,5 +1,10 @@
 import { BrowserWindow } from "electron";
 import bwipjs from "bwip-js";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { PosDatabase } from "./database";
 
 type ReceiptLanguage = "en" | "ar";
@@ -195,6 +200,143 @@ const sampleProduct = () => ({ name: "Beauty serum", name_ar: "سيروم الع
 
 export async function listPrinters(window: BrowserWindow) {
   return window.webContents.getPrintersAsync();
+}
+
+export function cashDrawerKickCommand(pin: 2 | 5 = 2) {
+  return Buffer.from([0x1b, 0x70, pin === 5 ? 0x01 : 0x00, 0x0c, 0x7d]);
+}
+
+function runRawPrinterCommand(printerName: string, command: Buffer) {
+  if (process.platform === "win32") return runWindowsRawPrinterCommand(printerName, command);
+  if (process.platform !== "darwin" && process.platform !== "linux")
+    return Promise.reject(new Error("CASH_DRAWER_PLATFORM_UNSUPPORTED"));
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("lp", ["-d", printerName, "-o", "raw", "-"], {
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let stderr = "";
+    const timeout = setTimeout(() => child.kill(), 15_000);
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(new Error(`CASH_DRAWER_PRINT_FAILED: ${error.message}`));
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || "CASH_DRAWER_PRINT_FAILED"));
+    });
+    child.stdin.once("error", () => undefined);
+    child.stdin.end(command);
+  });
+}
+
+async function runWindowsRawPrinterCommand(printerName: string, command: Buffer) {
+  const dataPath = path.join(os.tmpdir(), `shea-drawer-${randomUUID()}.bin`);
+  await writeFile(dataPath, command, { flag: "wx", mode: 0o600 });
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SheaRawPrinter {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DOC_INFO_1 { public string pDocName; public string pOutputFile; public string pDataType; }
+  [DllImport("winspool.drv", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool OpenPrinter(string name, out IntPtr handle, IntPtr defaults);
+  [DllImport("winspool.drv", SetLastError=true, CharSet=CharSet.Unicode)] public static extern int StartDocPrinter(IntPtr handle, int level, ref DOC_INFO_1 info);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr handle);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool WritePrinter(IntPtr handle, byte[] bytes, int count, out int written);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr handle);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr handle);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool ClosePrinter(IntPtr handle);
+  public static void Send(string name, byte[] bytes) {
+    IntPtr handle;
+    if (!OpenPrinter(name, out handle, IntPtr.Zero)) throw new Exception("OpenPrinter failed: " + Marshal.GetLastWin32Error());
+    bool document = false;
+    bool page = false;
+    try {
+      var info = new DOC_INFO_1 { pDocName = "Shea POS cash drawer", pDataType = "RAW" };
+      if (StartDocPrinter(handle, 1, ref info) == 0) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
+      document = true;
+      if (!StartPagePrinter(handle)) throw new Exception("StartPagePrinter failed: " + Marshal.GetLastWin32Error());
+      page = true;
+      int written;
+      if (!WritePrinter(handle, bytes, bytes.Length, out written) || written != bytes.Length) throw new Exception("WritePrinter failed: " + Marshal.GetLastWin32Error());
+    } finally {
+      if (page) EndPagePrinter(handle);
+      if (document) EndDocPrinter(handle);
+      ClosePrinter(handle);
+    }
+  }
+}
+'@
+[SheaRawPrinter]::Send($env:SHEA_POS_PRINTER, [IO.File]::ReadAllBytes($env:SHEA_POS_DRAWER_DATA))
+`;
+  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript], {
+        stdio: ["ignore", "ignore", "pipe"],
+        env: { ...process.env, SHEA_POS_PRINTER: printerName, SHEA_POS_DRAWER_DATA: dataPath },
+      });
+      let stderr = "";
+      const timeout = setTimeout(() => child.kill(), 15_000);
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(new Error(`CASH_DRAWER_PRINT_FAILED: ${error.message}`));
+      });
+      child.once("close", (code) => {
+        clearTimeout(timeout);
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || "CASH_DRAWER_PRINT_FAILED"));
+      });
+    });
+  } finally {
+    await rm(dataPath, { force: true });
+  }
+}
+
+function readDefaultPrinterName() {
+  const windows = process.platform === "win32";
+  if (!windows && process.platform !== "darwin" && process.platform !== "linux")
+    return Promise.resolve("");
+  const args = windows
+    ? ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(
+      "(Get-CimInstance Win32_Printer | Where-Object { $_.Default } | Select-Object -First 1 -ExpandProperty Name)",
+      "utf16le",
+    ).toString("base64")]
+    : ["-d"];
+  return new Promise<string>((resolve) => {
+    const child = spawn(windows ? "powershell.exe" : "lpstat", args, { stdio: ["ignore", "pipe", "ignore"] });
+    let output = "";
+    const timeout = setTimeout(() => child.kill(), 5000);
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.once("error", () => {
+      clearTimeout(timeout);
+      resolve("");
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) return resolve("");
+      if (windows) return resolve(output.trim());
+      resolve(output.match(/system default destination:\s*(.+)/i)?.[1]?.trim() ?? "");
+    });
+  });
+}
+
+export async function openCashDrawer(database: PosDatabase, window: BrowserWindow, requestedPrinter?: string, requestedPin?: 2 | 5) {
+  const printers = await listPrinters(window);
+  if (!printers.length) throw new Error("NO_SYSTEM_PRINTERS");
+  const savedName = requestedPrinter || database.getSetting("cashDrawerPrinterName") || database.getSetting("printerName");
+  const targetName = savedName || await readDefaultPrinterName();
+  if (!targetName) throw new Error("CASH_DRAWER_PRINTER_REQUIRED");
+  const printer = printers.find((item) => item.name === targetName);
+  if (!printer) throw new Error("PRINTER_NOT_FOUND");
+  const pin = requestedPin ?? (database.getSetting("cashDrawerPin") === "5" ? 5 : 2);
+  await runRawPrinterCommand(printer.name, cashDrawerKickCommand(pin));
+  return { printerName: printer.name };
 }
 
 export function printOptions(printerName?: string, pageSize?: { width: number; height: number }): Electron.WebContentsPrintOptions {

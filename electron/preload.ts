@@ -26,6 +26,11 @@ const api: PosApi = {
     ipcRenderer.on("pos:realtime-order", handler);
     return () => ipcRenderer.removeListener("pos:realtime-order", handler);
   },
+  onCashSessionAutoClosed: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on("pos:cash-session-auto-closed", handler);
+    return () => ipcRenderer.removeListener("pos:cash-session-auto-closed", handler);
+  },
   onOpenOrderNotification: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, orderId: number) => listener(orderId);
     ipcRenderer.on("pos:open-order-notification", handler);
@@ -113,6 +118,7 @@ const api: PosApi = {
   refreshProductImage: (input) => ipcRenderer.invoke("pos:refresh-product-image", input),
   refreshProductImages: (input) => ipcRenderer.invoke("pos:refresh-product-images", input),
   listPrinters: () => ipcRenderer.invoke("pos:list-printers"),
+  openCashDrawer: (input) => ipcRenderer.invoke("pos:open-cash-drawer", input),
   printReceipt: (input) => ipcRenderer.invoke("pos:print-receipt", input),
   previewReceipt: (input) => ipcRenderer.invoke("pos:preview-receipt", input),
   previewInvoice: (input) => ipcRenderer.invoke("pos:preview-invoice", input),

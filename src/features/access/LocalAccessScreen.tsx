@@ -5,12 +5,14 @@ import type { AppState } from "../../types";
 
 export function LocalAccessScreen({
   setupRequired,
+  remembered = false,
   onSuccess,
   canGoBack = false,
   onBack,
   onLock,
 }: {
   setupRequired: boolean;
+  remembered?: boolean;
   onSuccess: (state: AppState) => void;
   canGoBack?: boolean;
   onBack?: () => void;
@@ -20,6 +22,7 @@ export function LocalAccessScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [recovering, setRecovering] = useState(false);
+  const [rememberSession, setRememberSession] = useState(remembered);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -39,6 +42,7 @@ export function LocalAccessScreen({
         : await window.pos.localLogin({
             username: String(data.get("username")),
             secret,
+            rememberSession: data.get("rememberSession") === "on",
           });
       onSuccess(result as AppState);
     } catch (value) {
@@ -94,6 +98,13 @@ export function LocalAccessScreen({
           {t("accessCode")}
           <span className="input-with-icon"><KeyRound /><input name="secret" type="password" minLength={4} autoComplete={setupRequired ? "new-password" : "current-password"} required /></span>
         </label>
+        {!setupRequired ? <div className="remember-session-field">
+          <label className="remember-session-control">
+            <input name="rememberSession" type="checkbox" checked={rememberSession} onChange={(event) => setRememberSession(event.target.checked)} />
+            <span>{t("keepMeSignedIn")}</span>
+          </label>
+          <small>{t("keepMeSignedInHelp")}</small>
+        </div> : null}
         {setupRequired ? <label>{t("confirmAccessCode")}<input name="confirmSecret" type="password" minLength={4} autoComplete="new-password" required /></label> : null}
         {error ? <div className="form-error">{error}</div> : null}
         <button className="button primary full" disabled={busy}>

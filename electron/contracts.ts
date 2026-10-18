@@ -168,6 +168,7 @@ export type PosApi = {
   onSoftRefresh(listener: () => void): () => void;
   onDataSyncComplete(listener: () => void): () => void;
   onRealtimeOrder(listener: (orderId: number) => void): () => void;
+  onCashSessionAutoClosed(listener: () => void): () => void;
   onOpenOrderNotification(listener: (orderId: number) => void): () => void;
   notifyNewOrder(input: { id: number; title: string; body: string }): Promise<void>;
   listUnreadOnlineOrderIds(): Promise<number[]>;
@@ -191,7 +192,7 @@ export type PosApi = {
   revokeAccountSession(input: { tokenId: string }): Promise<void>;
   revokeOtherAccountSessions(): Promise<void>;
   setupLocalOwner(input: { name: string; username: string; secret: string }): Promise<unknown>;
-  localLogin(input: { username: string; secret: string }): Promise<unknown>;
+  localLogin(input: { username: string; secret: string; rememberSession?: boolean }): Promise<unknown>;
   recoverLocalOwner(input: { username: string; partnerPassword: string; secret: string }): Promise<unknown>;
   localLogout(): Promise<void>;
   localTouch(): Promise<void>;
@@ -274,7 +275,7 @@ export type PosApi = {
     note?: string;
   }): Promise<unknown>;
   closeCashSession(input: {
-    countedCash: number;
+    countedCash?: number;
     note?: string;
   }): Promise<unknown>;
   createBackup(): Promise<{ path: string } | null>;
@@ -302,6 +303,7 @@ export type PosApi = {
   refreshProductImage(input: { productLocalId: string }): Promise<unknown>;
   refreshProductImages(input?: { productLocalIds?: string[] }): Promise<unknown>;
   listPrinters(): Promise<unknown[]>;
+  openCashDrawer(input?: { printerName?: string; pin?: 2 | 5 }): Promise<{ printerName: string }>;
   printReceipt(input: { saleId: string; printerName?: string }): Promise<void>;
   previewReceipt(input?: {
     saleId?: string;

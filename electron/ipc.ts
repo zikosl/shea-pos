@@ -17,6 +17,7 @@ import {
 } from "./access";
 import {
   listPrinters,
+  openCashDrawer,
   previewPriceLabel,
   previewReceipt,
   previewInvoice,
@@ -185,9 +186,12 @@ const cashOpenSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 const cashCloseSchema = z.object({
-  countedCash: z.number().min(0),
+  countedCash: z.number().min(0).optional(),
   note: z.string().trim().max(500).optional(),
-});
+}).refine(
+  (value) => value.countedCash !== undefined || value.note === "SYSTEM_AUTO_CLOSE_NO_PHYSICAL_COUNT",
+  { message: "CASH_COUNT_REQUIRED" },
+);
 const printSchema = z.object({
   saleId: z.string().min(1),
   printerName: z.string().optional(),
@@ -235,7 +239,7 @@ const priceLabelPrintSchema = z.object({
   printerName: z.string().optional(),
 });
 const secretSchema = z.string().min(4).max(128);
-const localLoginSchema = z.object({ username: z.string().trim().min(2).max(80), secret: secretSchema });
+const localLoginSchema = z.object({ username: z.string().trim().min(2).max(80), secret: secretSchema, rememberSession: z.boolean().optional().default(false) });
 const localUserBaseSchema = z.object({
   name: z.string().trim().min(2).max(120),
   username: z.string().trim().min(2).max(80).regex(/^[a-zA-Z0-9._-]+$/),
@@ -301,6 +305,11 @@ const onlineOrderQuotationSchema = z.object({
 const settingKeys = [
   "theme",
   "printerName",
+  "cashDrawerPrinterName",
+  "cashDrawerAutoOpen",
+  "cashDrawerPin",
+  "cashSessionAutoCloseEnabled",
+  "cashSessionAutoCloseTime",
   "labelPrinterName",
   "storeName",
   "receiptHeader",
@@ -483,7 +492,7 @@ export function registerIpc(
   });
   handle("pos:local-login", (raw) => {
     const input = localLoginSchema.parse(raw);
-    access.login(input.username, input.secret);
+    access.login(input.username, input.secret, input.rememberSession);
     return state();
   });
   handle("pos:recover-local-owner", async (raw) => {
@@ -699,15 +708,26 @@ export function registerIpc(
       access.audit("SALE_COMPLETED", "Sale", sale.id, { saleNumber: sale.sale_number, total: sale.total });
       return sale;
     };
-    if (!gateway.enabled()) return recordSale(database.checkout(input));
+    const completeCommittedSale = async (sale: any) => {
+      recordSale(sale);
+      if (database.getSetting("cashDrawerAutoOpen") === "true") {
+        try {
+          await openCashDrawer(database, mainWindow);
+        } catch (error) {
+          sale.cashDrawerError = error instanceof Error ? error.message : "CASH_DRAWER_PRINT_FAILED";
+        }
+      }
+      return sale;
+    };
+    if (!gateway.enabled()) return completeCommittedSale(database.checkout(input));
     const transactionId = randomUUID();
     const device = JSON.parse(database.getSetting("device") ?? "{}") as { id?: string };
     const saleNumber = `POS-${device.id?.slice(0, 6) ?? "LOCAL"}-${Date.now()}`;
     await gateway.createSale(input, transactionId, saleNumber);
     const sale = database.checkout({ ...input, transactionId, saleNumber, gatewayCommitted: true });
-    recordSale(sale);
-    await gateway.refreshProducts();
-    return sale;
+    const completed = await completeCommittedSale(sale);
+    await gateway.refreshProducts().catch(() => undefined);
+    return completed;
   }, { permission: "POS_SELL", syncAfter: true });
   handle("pos:get-cash-session", () => database.getCashSession(), { permission: ["POS_SELL", "REGISTER_MANAGE"] });
   handle("pos:list-cash-sessions", () => database.listCashSessions(), { permission: "REGISTER_MANAGE" });
@@ -716,9 +736,8 @@ export function registerIpc(
     return database.openCashSession(cashOpenSchema.parse(raw));
   }, { permission: "REGISTER_MANAGE", audit: true });
   handle("pos:close-cash-session", (raw) => {
-    sync.assertCanTransact();
     return database.closeCashSession(cashCloseSchema.parse(raw));
-  }, { permission: "REGISTER_MANAGE", audit: true });
+  }, { permission: "REGISTER_MANAGE", audit: true, syncAfter: true });
   handle("pos:create-backup", async () => {
     const selection = await dialog.showOpenDialog(mainWindow, { title: "Choose backup location", properties: ["openDirectory", "createDirectory"] });
     if (selection.canceled || !selection.filePaths[0]) return null;
@@ -757,6 +776,12 @@ export function registerIpc(
     return assets.refreshProducts(input?.productLocalIds);
   }, { permission: "INVENTORY_MANAGE", audit: true });
   handle("pos:list-printers", () => listPrinters(mainWindow), { authenticated: true });
+  handle("pos:open-cash-drawer", async (raw) => {
+    const input = z.object({ printerName: z.string().max(255).optional(), pin: z.union([z.literal(2), z.literal(5)]).optional() }).optional().parse(raw);
+    const result = await openCashDrawer(database, mainWindow, input?.printerName, input?.pin);
+    access.audit("CASH_DRAWER_OPENED", "CashDrawer", result.printerName);
+    return result;
+  }, { permission: ["POS_SELL", "SETTINGS_MANAGE"] });
   handle("pos:print-receipt", (raw) => {
     const input = printSchema.parse(raw);
     return printReceipt(database, input.saleId, input.printerName);

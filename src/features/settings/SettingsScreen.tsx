@@ -33,7 +33,7 @@ type StoreNetwork = {
 const defaults: Record<string, string> = {
   theme: "system",
   language: "en",
-  primaryColor: "#2f6fed",
+  primaryColor: "#a93660",
   receiptPaperWidth: "80",
   receiptShowLogo: "true",
   receiptShowCustomer: "true",
@@ -48,6 +48,11 @@ const defaults: Record<string, string> = {
   receiptCodeType: "qr",
   receiptCodePosition: "footer",
   receiptCodeAlignment: "center",
+  cashDrawerPrinterName: "",
+  cashDrawerAutoOpen: "false",
+  cashDrawerPin: "2",
+  cashSessionAutoCloseEnabled: "false",
+  cashSessionAutoCloseTime: "20:00",
   labelWidth: "50",
   labelHeight: "30",
   labelShowLogo: "false",
@@ -61,6 +66,8 @@ const defaults: Record<string, string> = {
 
 function settingsDraft(values: Record<string, string>) {
   const merged = { ...defaults, ...values };
+  if (merged.primaryColor.toLowerCase() === "#2f6fed")
+    merged.primaryColor = defaults.primaryColor;
   for (const [key, fallback] of Object.entries(defaults)) {
     if (!merged[key]) merged[key] = fallback;
   }
@@ -71,16 +78,19 @@ export function SettingsScreen({
   values,
   onChange,
   onNotice,
+  onSignOut,
 }: {
   values: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
   onNotice: (message: string) => void;
+  onSignOut: () => void | Promise<void>;
 }) {
   const { t, language } = useI18n();
   const [printers, setPrinters] = useState<any[]>([]);
   const [draft, setDraft] = useState(() => settingsDraft(values));
   const [savedDraft, setSavedDraft] = useState(() => settingsDraft(values));
   const previousValues = useRef(values);
+  const registerSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
   const [tab, setTab] = useState<PrintTab>("receipt");
   const [section, setSection] = useState<SettingsTab>("general");
   const [previewHtml, setPreviewHtml] = useState("");
@@ -89,6 +99,7 @@ export function SettingsScreen({
   const [loadingPrinters, setLoadingPrinters] = useState(true);
   const [saving, setSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [testingDrawer, setTestingDrawer] = useState(false);
   const [gatewayStatus, setGatewayStatus] = useState<any>(null);
   const [gatewayBusy, setGatewayBusy] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
@@ -215,6 +226,18 @@ export function SettingsScreen({
     }
   }
 
+  function changeRegisterSetting(key: "cashSessionAutoCloseEnabled" | "cashSessionAutoCloseTime", value: string) {
+    setDraft((current) => ({ ...current, [key]: value }));
+    registerSaveQueue.current = registerSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const result = await window.pos.updateSettings({ [key]: value });
+        onChange(result);
+        setSavedDraft((current) => ({ ...current, [key]: result[key] ?? value }));
+      })
+      .catch((error) => onNotice(localizeError(language, error)));
+  }
+
   function changeReceipt(key: string, value: string) {
     setDraft((current) => ({ ...current, receiptPreset: "custom", [key]: value }));
   }
@@ -305,6 +328,22 @@ export function SettingsScreen({
       onNotice(localizeError(language, value));
     } finally {
       setPrinting(false);
+    }
+  }
+
+  async function testCashDrawer() {
+    if (!window.confirm(t("cashDrawerTestConfirm"))) return;
+    setTestingDrawer(true);
+    try {
+      const result = await window.pos.openCashDrawer({
+        printerName: draft.cashDrawerPrinterName || draft.printerName || undefined,
+        pin: draft.cashDrawerPin === "5" ? 5 : 2,
+      });
+      onNotice(`${t("cashDrawerOpened")} · ${result.printerName}`);
+    } catch (value) {
+      onNotice(localizeError(language, value));
+    } finally {
+      setTestingDrawer(false);
     }
   }
 
@@ -472,6 +511,18 @@ export function SettingsScreen({
                 </select>
               </label>
             </section>
+            <section className="settings-group">
+              <h4>{t("register")}</h4>
+              <Toggle label={t("cashSessionAutoCloseEnabled")} value={draft.cashSessionAutoCloseEnabled} onChange={(value) => {
+                if (value === "true" && !window.confirm(t("cashSessionAutoCloseConfirm"))) return;
+                changeRegisterSetting("cashSessionAutoCloseEnabled", value);
+              }} />
+              <label>
+                {t("cashSessionAutoCloseTime")}
+                <input type="time" value={draft.cashSessionAutoCloseTime} disabled={draft.cashSessionAutoCloseEnabled !== "true"} onChange={(event) => changeRegisterSetting("cashSessionAutoCloseTime", event.target.value)} />
+              </label>
+              <small className="cash-session-close-help">{t("cashSessionAutoCloseHelp")}</small>
+            </section>
           </div>
         </section>
         </> : null}
@@ -550,6 +601,14 @@ export function SettingsScreen({
         </> : null}
 
         {section === "security" ? <>
+        <section className="panel settings-section account-signout-section">
+          <div className="section-title">
+            <div className="section-icon"><LogOut /></div>
+            <div><h3>{t("sheaAccount")}</h3><p>{t("signOutPartnerHelp")}</p></div>
+          </div>
+          <button type="button" className="button secondary danger" onClick={() => void onSignOut()}><LogOut />{t("signOutPartner")}</button>
+        </section>
+
         <section className="panel settings-section account-sessions-section">
           <div className="section-title">
             <div className="section-icon"><MonitorSmartphone /></div>
@@ -609,6 +668,13 @@ export function SettingsScreen({
             {tab === "receipt" ? <PrinterSelect label={t("receiptPrinter")} value={draft.printerName || ""} onChange={(value) => change("printerName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} /> : <PrinterSelect label={t("labelPrinter")} value={draft.labelPrinterName || ""} onChange={(value) => change("labelPrinterName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("defaultPrinter")} missingLabel={t("savedPrinterMissing")} />}
             {tab === "receipt" ? (
               <>
+                <section className="receipt-control-group cash-drawer-control">
+                  <div className="receipt-control-heading"><strong>{t("cashDrawer")}</strong><small>{t("cashDrawerHelp")}</small></div>
+                  <PrinterSelect label={t("cashDrawerDevice")} value={draft.cashDrawerPrinterName || ""} onChange={(value) => change("cashDrawerPrinterName", value)} printers={printers} loading={loadingPrinters} defaultLabel={t("followReceiptPrinter")} missingLabel={t("savedPrinterMissing")} />
+                  <label>{t("cashDrawerPin")}<select value={draft.cashDrawerPin} onChange={(event) => change("cashDrawerPin", event.target.value)}><option value="2">{t("drawerPinTwo")}</option><option value="5">{t("drawerPinFive")}</option></select></label>
+                  <Toggle label={t("cashDrawerAutoOpen")} value={draft.cashDrawerAutoOpen} onChange={(value) => change("cashDrawerAutoOpen", value)} />
+                  <button type="button" className="button secondary" disabled={testingDrawer || loadingPrinters || !printers.length} onClick={() => void testCashDrawer()}>{testingDrawer ? <LoaderCircle className="spin" /> : <Printer />}{testingDrawer ? t("testingCashDrawer") : t("testCashDrawer")}</button>
+                </section>
                 <label className="print-paper-control">{t("paperWidth")}<select value={draft.receiptPaperWidth} onChange={(event) => changeReceipt("receiptPaperWidth", event.target.value)}><option value="58">58 mm</option><option value="80">80 mm</option></select></label>
                 <div className="receipt-control-group">
                   <div className="receipt-control-heading"><strong>{t("receiptPreset")}</strong><small>{t("receiptPresetHelp")}</small></div>

@@ -3,18 +3,19 @@ import {
   BarChart3,
   BellRing,
   Boxes,
+  ChevronDown,
   Cloud,
   CloudOff,
   Download as DownloadIcon,
   FileClock,
   Gift,
+  Home,
   Keyboard,
+  LayoutGrid,
   Languages,
   LoaderCircle,
   LogOut,
   PackagePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
   ReceiptText,
   RefreshCw,
   Settings,
@@ -29,7 +30,7 @@ import { InvoicesScreen, OrdersScreen } from "./features/history/HistoryScreens"
 import { InventoryScreen } from "./features/inventory/InventoryScreen";
 import { StockEntriesScreen } from "./features/inventory/StockEntriesScreen";
 import { BarcodeManagerScreen } from "./features/barcodes/BarcodeManagerScreen";
-import { HOLD_SALE_SHORTCUT_EVENT, PosScreen } from "./features/pos/PosScreen";
+import { CASH_SESSION_UPDATED_EVENT, COMPLETE_SALE_SHORTCUT_EVENT, FOCUS_TENDERED_AMOUNT_EVENT, HOLD_SALE_SHORTCUT_EVENT, POS_PAGE_SHORTCUT_EVENT, SAFE_POS_EXIT_REQUEST_EVENT, PosScreen } from "./features/pos/PosScreen";
 import { SettingsScreen } from "./features/settings/SettingsScreen";
 import { ReportsScreen } from "./features/reports/ReportsScreen";
 import { LocalAccessScreen } from "./features/access/LocalAccessScreen";
@@ -51,11 +52,24 @@ import {
 } from "./components/KeyboardShortcuts";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { DeploymentSetupScreen } from "./features/setup/DeploymentSetupScreen";
+import { HomeLauncher, type LauncherGroup, type LauncherPage } from "./features/home/HomeLauncher";
 
-type Page =
-  "pos" | "stock" | "barcodes" | "entries" | "gifts" | "orders" | "sales" | "reports" | "requests" | "team" | "settings";
+type Page = LauncherPage | "home";
 function isSoftRefreshShortcut(event: KeyboardEvent) {
   return event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r");
+}
+function contrastingTextColor(hex: string) {
+  const value = hex.replace("#", "");
+  const normalized = value.length === 3
+    ? value.split("").map((part) => part + part).join("")
+    : value;
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) return "#fff";
+  const channels = [0, 2, 4].map((offset) => parseInt(normalized.slice(offset, offset + 2), 16) / 255);
+  const weights = [0.2126, 0.7152, 0.0722];
+  const luminance = channels
+    .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, channel, index) => sum + channel * (weights[index] ?? 0), 0);
+  return luminance > 0.2 ? "#29151d" : "#fff";
 }
 let incomingOrderAudioContext: AudioContext | null = null;
 function playIncomingOrderTone() {
@@ -95,12 +109,13 @@ const emptyState: AppState = {
   localAccess: {
     setupRequired: false,
     authenticated: false,
+    remembered: false,
     user: null,
     permissions: [],
   },
 };
 
-const pagePermission: Record<Page, Permission> = {
+const pagePermission: Record<LauncherPage, Permission> = {
   pos: "POS_SELL",
   stock: "INVENTORY_VIEW",
   barcodes: "INVENTORY_MANAGE",
@@ -114,9 +129,15 @@ const pagePermission: Record<Page, Permission> = {
   settings: "SETTINGS_MANAGE",
 };
 
-function firstAllowedPage(granted: Permission[]): Page {
-  const preferred: Page[] = ["pos", "gifts", "orders", "stock", "barcodes", "entries", "sales", "reports", "requests", "team", "settings"];
+function firstAllowedPage(granted: Permission[]): LauncherPage {
+  const preferred: LauncherPage[] = ["pos", "gifts", "orders", "stock", "barcodes", "entries", "sales", "reports", "requests", "team", "settings"];
   return preferred.find((candidate) => granted.includes(pagePermission[candidate])) ?? "pos";
+}
+
+function landingPageFor(user: AppState["localAccess"]["user"], granted: Permission[]): Page {
+  if (user?.role === "CASHIER" && granted.includes("POS_SELL")) return "pos";
+  if (user?.role === "STOCK_CLERK" && granted.includes("INVENTORY_VIEW")) return "stock";
+  return "home";
 }
 
 export default function App() {
@@ -125,12 +146,13 @@ export default function App() {
   const [page, setPage] = useState<Page>("pos");
   const [pageTransitionLoading, setPageTransitionLoading] = useState(false);
   const previousPage = useRef(page);
+  const initialLandingApplied = useRef(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [settings, setSettings] = useState<Record<string, string>>({});
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bootError, setBootError] = useState("");
   const [switchingOperator, setSwitchingOperator] = useState(false);
+  const [operatorMenuOpen, setOperatorMenuOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [update, setUpdate] = useState<UpdateStatus>({ status: "idle" });
@@ -142,9 +164,33 @@ export default function App() {
   const realtimeOrderIds = useRef(new Set<number>());
   const alertedOrderIds = useRef(new Set<number>());
   const handledOrderIds = useRef(new Set<number>());
+  const operatorMenuRef = useRef<HTMLDivElement>(null);
   const hasOrdersPermission = state.localAccess.permissions.includes("ORDERS_VIEW");
   const language = (settings.language === "ar" ? "ar" : "en") as Language;
   const t = (key: Parameters<typeof translate>[1]) => translate(language, key);
+  const safeNavigateRef = useRef<(target: Page, beforeNavigate?: () => void) => void>(() => undefined);
+
+  function requestSafePosExit(continueAction: () => void) {
+    if (page !== "pos") {
+      continueAction();
+      return;
+    }
+    window.dispatchEvent(new CustomEvent(SAFE_POS_EXIT_REQUEST_EVENT, {
+      detail: { complete: continueAction },
+    }));
+  }
+
+  function navigateTo(target: Page, beforeNavigate?: () => void) {
+    if (target === page) {
+      beforeNavigate?.();
+      return;
+    }
+    requestSafePosExit(() => {
+      beforeNavigate?.();
+      setPage(target);
+    });
+  }
+  safeNavigateRef.current = navigateTo;
 
   useLayoutEffect(() => {
     if (previousPage.current === page) return;
@@ -194,7 +240,6 @@ export default function App() {
         refreshState(),
         window.pos.getSettings().then((value) => {
           setSettings(value);
-          setSidebarCollapsed(value.sidebarCollapsed === "true");
         }),
       ]);
     } catch (value) {
@@ -211,6 +256,11 @@ export default function App() {
     void window.pos.updateStatus().then(setUpdate).catch(() => undefined);
     return unsubscribe;
   }, []);
+  useEffect(() => window.pos.onCashSessionAutoClosed(() => {
+    window.dispatchEvent(new Event(CASH_SESSION_UPDATED_EVENT));
+    setNotice(t("registerAutoClosedNotice"));
+    void refreshState();
+  }), [language]);
   useEffect(() => {
     if (!state.authenticated || !state.localAccess.authenticated) return;
     const timer = window.setInterval(() => void refreshState(), 30_000);
@@ -229,25 +279,50 @@ export default function App() {
     };
   }, [state.authenticated, state.localAccess.authenticated]);
   useEffect(() => {
-    if (
-      state.localAccess.authenticated &&
-      !state.localAccess.permissions.includes(pagePermission[page])
-    )
-      setPage(firstAllowedPage(state.localAccess.permissions));
-  }, [page, state.localAccess.authenticated, state.localAccess.permissions]);
+    if (state.localAccess.authenticated && page !== "home" && !state.localAccess.permissions.includes(pagePermission[page]))
+      setPage(state.localAccess.user?.role === "STOCK_CLERK" && state.localAccess.permissions.includes("INVENTORY_VIEW")
+        ? "stock"
+        : firstAllowedPage(state.localAccess.permissions));
+  }, [page, state.localAccess.authenticated, state.localAccess.permissions, state.localAccess.user?.role]);
+  useLayoutEffect(() => {
+    if (!ready || !state.localAccess.authenticated || initialLandingApplied.current) return;
+    initialLandingApplied.current = true;
+    setPage(landingPageFor(state.localAccess.user, state.localAccess.permissions));
+  }, [ready, state.localAccess.authenticated, state.localAccess.user?.id]);
+  useEffect(() => {
+    if (!operatorMenuOpen) return;
+    const closeMenu = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key === "Escape") {
+        setOperatorMenuOpen(false);
+        return;
+      }
+      if (event instanceof MouseEvent && !operatorMenuRef.current?.contains(event.target as Node))
+        setOperatorMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeMenu);
+    document.addEventListener("keydown", closeMenu);
+    return () => {
+      document.removeEventListener("mousedown", closeMenu);
+      document.removeEventListener("keydown", closeMenu);
+    };
+  }, [operatorMenuOpen]);
   useEffect(() => {
     const theme = settings.theme || "system";
     const media = matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
       const dark = theme === "dark" || (theme === "system" && media.matches);
       document.documentElement.dataset.theme = dark ? "dark" : "light";
+      const configuredColor = settings.primaryColor?.toLowerCase();
+      const legacyDefault = !configuredColor || configuredColor === "#2f6fed" || configuredColor === "#a93660";
+      const primaryColor = legacyDefault ? (dark ? "#d9829f" : "#a93660") : settings.primaryColor || "#a93660";
+      document.documentElement.style.setProperty(
+        "--primary",
+        primaryColor,
+      );
+      document.documentElement.style.setProperty("--primary-contrast", contrastingTextColor(primaryColor));
     };
     applyTheme();
     media.addEventListener("change", applyTheme);
-    document.documentElement.style.setProperty(
-      "--primary",
-      settings.primaryColor || "#2f6fed",
-    );
     document.documentElement.dir = settings.language === "ar" ? "rtl" : "ltr";
     document.documentElement.lang = settings.language || "en";
     return () => media.removeEventListener("change", applyTheme);
@@ -344,11 +419,7 @@ export default function App() {
     void refreshOrders(false).catch(() => undefined);
     const unsubscribe = window.pos.onDataSyncComplete(() => void refreshOrders(true).catch(() => undefined));
     const unsubscribeOpen = window.pos.onOpenOrderNotification((id) => {
-      handledOrderIds.current.add(id);
-      if (handledOrderIds.current.size > 1000) handledOrderIds.current.delete(handledOrderIds.current.values().next().value!);
-      setIncomingOrders((current) => current.filter((row) => Number(row.server_id) !== id));
-      setOpenOrderId(id);
-      setPage("orders");
+      safeNavigateRef.current("orders", () => openIncomingOrder(id));
     });
     return () => {
       active = false;
@@ -365,9 +436,10 @@ export default function App() {
   }
 
   function openIncomingOrder(id: number) {
-    dismissIncomingOrder(id);
-    setOpenOrderId(id);
-    setPage("orders");
+    navigateTo("orders", () => {
+      dismissIncomingOrder(id);
+      setOpenOrderId(id);
+    });
   }
 
   async function sync() {
@@ -404,33 +476,13 @@ export default function App() {
     return () => window.removeEventListener("keydown", interceptRefresh, { capture: true });
   }, [state.authenticated, state.localAccess.authenticated, busy, language]);
 
-  async function toggleSidebar() {
-    const next = !sidebarCollapsed;
-    setSidebarCollapsed(next);
-    setSettings((current) => ({
-      ...current,
-      sidebarCollapsed: String(next),
-    }));
-    try {
-      setSettings(
-        await window.pos.updateSettings({ sidebarCollapsed: String(next) }),
-      );
-    } catch (error) {
-      setNotice(localizeError(language, error));
-      setSidebarCollapsed(!next);
-      setSettings((current) => ({
-        ...current,
-        sidebarCollapsed: String(!next),
-      }));
-    }
-  }
-
   async function logout() {
     if (!window.confirm(t("logoutConfirm"))) return;
     setBusy(true);
     try {
       await window.pos.signOut();
       setSwitchingOperator(false);
+      initialLandingApplied.current = false;
       setState(emptyState);
       setPage("pos");
       setNotice("");
@@ -438,6 +490,18 @@ export default function App() {
       setNotice(localizeError(language, value));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function logoutLocalOperator() {
+    if (!window.confirm(t("localSignOutConfirm"))) return;
+    try {
+      await window.pos.localLogout();
+      setSwitchingOperator(false);
+      initialLandingApplied.current = false;
+      await refreshState();
+    } catch (value) {
+      setNotice(localizeError(language, value));
     }
   }
 
@@ -500,10 +564,12 @@ export default function App() {
       <I18nProvider language={language}>
         <LocalAccessScreen
           setupRequired={state.localAccess.setupRequired}
+          remembered={state.localAccess.remembered}
           onSuccess={(value) => {
             const next = value as AppState;
+            initialLandingApplied.current = true;
             setState(next);
-            setPage(firstAllowedPage(next.localAccess.permissions));
+            setPage(landingPageFor(next.localAccess.user, next.localAccess.permissions));
           }}
         />
       </I18nProvider>
@@ -512,19 +578,51 @@ export default function App() {
   const can = (permission: Permission) =>
     state.localAccess.permissions.includes(permission);
 
+  const allNavigationGroups: LauncherGroup[] = [
+    {
+      id: "operations",
+      label: t("navOperations"),
+      items: [
+        { id: "pos", label: t("sell"), description: t("homePosDescription"), icon: ShoppingBag },
+        { id: "orders", label: t("orders1"), description: t("homeOrdersDescription"), icon: FileClock, badge: unreadOnlineCount ? `${unreadOnlineCount} ${t("unread")}` : undefined },
+        ...(state.capabilities.includes("CUSTOM_ORDERS") ? [{ id: "gifts" as const, label: t("customOrders"), description: t("homeGiftsDescription"), icon: Gift }] : []),
+      ],
+    },
+    {
+      id: "inventory",
+      label: t("navCatalogInventory"),
+      items: [
+        { id: "stock", label: t("inventory"), description: t("homeInventoryDescription"), icon: Boxes },
+        { id: "entries", label: t("stockEntries"), description: t("homeEntriesDescription"), icon: PackagePlus },
+        { id: "barcodes", label: t("barcodeManager"), description: t("homeBarcodesDescription"), icon: ScanLine },
+        { id: "requests", label: t("requests"), description: t("homeRequestsDescription"), icon: PackagePlus },
+      ],
+    },
+    {
+      id: "insights",
+      label: t("navInsights"),
+      items: [
+        { id: "sales", label: t("invoices"), description: t("homeSalesDescription"), icon: ReceiptText },
+        { id: "reports", label: t("reports"), description: t("homeReportsDescription"), icon: BarChart3 },
+      ],
+    },
+    {
+      id: "administration",
+      label: t("navAdministration"),
+      items: [
+        { id: "team", label: t("team"), description: t("homeTeamDescription"), icon: UsersRound },
+        { id: "settings", label: t("settings"), description: t("homeSettingsDescription"), icon: Settings },
+      ],
+    },
+  ];
+  const navGroups = allNavigationGroups.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => can(pagePermission[item.id])),
+  }));
   const navigation = [
-    { id: "pos", label: t("sell"), icon: ShoppingBag, permission: "POS_SELL" },
-    { id: "stock", label: t("inventory"), icon: Boxes, permission: "INVENTORY_VIEW" },
-    { id: "barcodes", label: t("barcodeManager"), icon: ScanLine, permission: "INVENTORY_MANAGE" },
-    { id: "entries", label: t("stockEntries"), icon: PackagePlus, permission: "STOCK_RECEIVE" },
-    ...(state.capabilities.includes("CUSTOM_ORDERS") ? [{ id: "gifts" as const, label: t("customOrders"), icon: Gift, permission: "CUSTOM_ORDERS_VIEW" as const }] : []),
-    { id: "orders", label: t("orders1"), icon: FileClock, permission: "ORDERS_VIEW" },
-    { id: "sales", label: t("invoices"), icon: ReceiptText, permission: "INVOICES_VIEW" },
-    { id: "reports", label: t("reports"), icon: BarChart3, permission: "REPORTS_VIEW" },
-    { id: "requests", label: t("requests"), icon: PackagePlus, permission: "CATALOG_REQUEST" },
-    { id: "team", label: t("team"), icon: UsersRound, permission: "USERS_MANAGE" },
-    { id: "settings", label: t("settings"), icon: Settings, permission: "SETTINGS_MANAGE" },
-  ].filter((item) => can(item.permission as Permission)) as Array<{ id: Page; label: string; icon: typeof ShoppingBag; permission: string }>;
+    { id: "home" as const, label: t("home"), icon: Home },
+    ...navGroups.flatMap((group) => group.items.map(({ id, label, icon }) => ({ id, label, icon }))),
+  ];
 
   const navigationKeys: Partial<Record<Page, string>> = {
     pos: "1",
@@ -539,8 +637,9 @@ export default function App() {
     team: "0",
   };
   const openPage = (target: Page) => {
-    if (navigation.some((item) => item.id === target)) setPage(target);
+    if (navigation.some((item) => item.id === target)) navigateTo(target);
   };
+  const openLauncher = () => navigateTo("home");
   const focusPageSearch = () => {
     const input = document.querySelector<HTMLInputElement>(
       "[data-keyboard-search]:not([disabled])",
@@ -582,11 +681,45 @@ export default function App() {
       run: () => void sync(),
     },
     {
+      id: "applications-home",
+      key: "Escape",
+      enabled: page !== "home",
+      run: () => navigateTo("home"),
+    },
+    {
       id: "hold-sale-f3",
       key: "F3",
       allowInField: true,
       enabled: page === "pos" && can("POS_SELL"),
       run: () => window.dispatchEvent(new Event(HOLD_SALE_SHORTCUT_EVENT)),
+    },
+    {
+      id: "complete-sale-f10",
+      key: "F10",
+      allowInField: true,
+      enabled: page === "pos" && can("POS_SELL"),
+      run: () => window.dispatchEvent(new Event(COMPLETE_SALE_SHORTCUT_EVENT)),
+    },
+    {
+      id: "focus-tendered-amount-f6",
+      key: "F6",
+      allowInField: true,
+      enabled: page === "pos" && can("POS_SELL"),
+      run: () => window.dispatchEvent(new Event(FOCUS_TENDERED_AMOUNT_EVENT)),
+    },
+    {
+      id: "pos-next-products-page",
+      key: "ArrowRight",
+      primary: true,
+      enabled: page === "pos",
+      run: () => window.dispatchEvent(new CustomEvent(POS_PAGE_SHORTCUT_EVENT, { detail: { direction: "next" } })),
+    },
+    {
+      id: "pos-previous-products-page",
+      key: "ArrowLeft",
+      primary: true,
+      enabled: page === "pos",
+      run: () => window.dispatchEvent(new CustomEvent(POS_PAGE_SHORTCUT_EVENT, { detail: { direction: "previous" } })),
     },
     {
       id: "sync",
@@ -611,14 +744,7 @@ export default function App() {
       primary: true,
       shift: true,
       allowInField: true,
-      run: () => setSwitchingOperator(true),
-    },
-    {
-      id: "sidebar",
-      key: "b",
-      primary: true,
-      allowInField: true,
-      run: () => void toggleSidebar(),
+      run: () => requestSafePosExit(() => setSwitchingOperator(true)),
     },
     {
       id: "help",
@@ -636,100 +762,33 @@ export default function App() {
     ...navigation.map((item) => ({ id: `command-${item.id}`, label: item.label, group: commandGroups.navigation, icon: item.icon, run: () => openPage(item.id) })),
     { id: "command-sync", label: t("sync"), group: commandGroups.actions, icon: RefreshCw, shortcut: "Ctrl ⇧ S", run: () => void sync() },
     { id: "command-search", label: t("focusSearch"), group: commandGroups.actions, icon: Keyboard, shortcut: "F2", run: focusPageSearch },
-    { id: "command-operator", label: t("switchOperator"), group: commandGroups.actions, icon: UserRoundCog, shortcut: "Ctrl ⇧ L", run: () => setSwitchingOperator(true) },
-    { id: "command-sidebar", label: sidebarCollapsed ? t("expandSidebar") : t("collapseSidebar"), group: commandGroups.system, icon: sidebarCollapsed ? PanelLeftOpen : PanelLeftClose, shortcut: "Ctrl B", run: () => void toggleSidebar() },
+    { id: "command-operator", label: t("switchOperator"), group: commandGroups.actions, icon: UserRoundCog, shortcut: "Ctrl ⇧ L", run: () => requestSafePosExit(() => setSwitchingOperator(true)) },
+    { id: "command-local-logout", label: t("signOutOperator"), group: commandGroups.system, icon: LogOut, run: () => requestSafePosExit(() => void logoutLocalOperator()) },
     { id: "command-shortcuts", label: t("keyboardShortcuts"), group: commandGroups.system, icon: Keyboard, shortcut: "F1", run: () => setShortcutsOpen(true) },
-    { id: "command-logout", label: t("signOut"), group: commandGroups.system, icon: LogOut, run: () => void logout() },
   ].filter((command) => command.id !== "command-sync" || can("SYNC_MANAGE"));
 
   return (
     <I18nProvider language={language}>
       <CommandPalette open={commandOpen} onClose={() => setCommandOpen(false)} commands={commands} placeholder={t("commandPalette")} emptyText={t("noMatchingCommands")} navigateText={t("navigate")} selectText={t("select")} />
-      <div
-        className={`shell ${page === "pos" ? "pos-mode" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
-      >
+      <div className={`app-shell ${page === "pos" ? "pos-mode" : ""}`}>
         <KeyboardShortcuts
           shortcuts={shortcuts}
           active={!switchingOperator && !shortcutsOpen && !commandOpen}
         />
-        <aside className="sidebar">
-          <button
-            type="button"
-            className="sidebar-toggle"
-            aria-label={
-              sidebarCollapsed ? t("expandSidebar") : t("collapseSidebar")
-            }
-            title={sidebarCollapsed ? t("expandSidebar") : t("collapseSidebar")}
-            onClick={() => void toggleSidebar()}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-          </button>
-          <div className="brand">
-            {settings.storeLogo ? (
-              <img className="brand-logo" src={settings.storeLogo} alt="" />
-            ) : (
-              <span className="brand-mark">S</span>
-            )}
-            <div>
-              <strong>
-                {settings.storeName || state.partner?.companyName || "Shea POS"}
-              </strong>
-              <small>{t("workspace")}</small>
-            </div>
-          </div>
-          <nav>
-            {navigation.map((item) => (
-              <button
-                key={item.id}
-                className={page === item.id ? "active" : ""}
-                onClick={() => setPage(item.id)}
-                title={`${item.label}${navigationKeys[item.id] ? ` (Alt+${navigationKeys[item.id]})` : ""}`}
-                aria-keyshortcuts={navigationKeys[item.id] ? `Alt+${navigationKeys[item.id]}` : undefined}
-              >
-                <item.icon /> <span>{item.label}</span>
-                {navigationKeys[item.id] ? (
-                  <kbd className="nav-shortcut">
-                    Alt+{navigationKeys[item.id]}
-                  </kbd>
-                ) : null}
-                {item.id === "orders" && unreadOnlineCount > 0 ? <b className="nav-order-count">{unreadOnlineCount > 99 ? "99+" : unreadOnlineCount}</b> : null}
-              </button>
-            ))}
-          </nav>
-          <div className="sidebar-foot">
-            <div className="device">
-              <span className={state.lastSyncError ? "dot warn" : "dot"} />{" "}
-              <div>
-                <strong>{state.device?.name || t("register")}</strong>
-                <small>
-                  {state.pendingChanges
-                    ? `${state.pendingChanges} ${t("pendingChanges")}`
-                    : t("synced")}
-                </small>
-              </div>
-            </div>
-            <button
-              className="icon-button"
-              aria-label={t("switchOperator")}
-              onClick={() => setSwitchingOperator(true)}
-              title={t("switchOperator")}
-            >
-              <UserRoundCog />
-            </button>
-            <button
-              className="icon-button logout-button"
-              aria-label={t("signOut")}
-              onClick={() => void logout()}
-              title={t("signOut")}
-              disabled={busy}
-            >
-              <LogOut />
-            </button>
-          </div>
-        </aside>
         <main>
           <header>
             <div>
+              <button
+                className="app-launcher-button"
+                type="button"
+                aria-label={t("home")}
+                title={t("home")}
+                onClick={openLauncher}
+              >
+                <LayoutGrid aria-hidden="true" />
+              </button>
+            </div>
+            <div className="header-page-title">
               <p className="eyebrow">
                 {state.partner?.companyName || t("partnerWorkspace")}
               </p>
@@ -737,11 +796,14 @@ export default function App() {
             </div>
             <div className="header-actions">
               <div
-                className={`sync-pill ${state.lastSyncError ? "error" : ""}`}
+                className={`sync-pill ${state.lastSyncError ? "error" : state.pendingChanges ? "pending" : ""}`}
+                title={`${state.device?.name || t("register")}${state.pendingChanges ? ` · ${state.pendingChanges} ${t("pendingChanges")}` : ""}`}
               >
                 {state.lastSyncError ? <CloudOff /> : <Cloud />}
                 <span>
-                  {state.lastSyncAt
+                  {state.pendingChanges
+                    ? `${state.pendingChanges} ${t("pendingChanges")}`
+                    : state.lastSyncAt
                     ? `${t("synced")} ${new Date(state.lastSyncAt).toLocaleTimeString(localeFor(language), { hour: "2-digit", minute: "2-digit" })}`
                     : t("localOnly")}
                 </span>
@@ -778,6 +840,31 @@ export default function App() {
                   {update.status === "error" ? t("updateCheckFailed") : null}
                 </button>
               ) : null}
+              <div className="operator-menu" ref={operatorMenuRef}>
+                <button
+                  className="operator-menu-trigger"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={operatorMenuOpen}
+                  onClick={() => setOperatorMenuOpen((open) => !open)}
+                >
+                  <span className="operator-avatar">
+                    {(state.localAccess.user?.name || "S").trim().charAt(0).toUpperCase()}
+                  </span>
+                  <span className="operator-menu-name">{state.localAccess.user?.name || state.user?.email}</span>
+                  <ChevronDown aria-hidden="true" />
+                </button>
+                {operatorMenuOpen ? (
+                  <div className="operator-menu-popover" role="menu">
+                    <button type="button" role="menuitem" onClick={() => { setOperatorMenuOpen(false); requestSafePosExit(() => setSwitchingOperator(true)); }}>
+                      <UserRoundCog /> {t("switchOperator")}
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => { setOperatorMenuOpen(false); requestSafePosExit(() => void logoutLocalOperator()); }} disabled={busy}>
+                      <LogOut /> {t("signOutOperator")}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </header>
           {notice && (
@@ -787,8 +874,27 @@ export default function App() {
             </div>
           )}
           <section className="content" aria-busy={pageTransitionLoading}>
+            {page === "home" && (
+              <HomeLauncher
+                greeting={t("homeWelcome").replace("{name}", state.localAccess.user?.name || state.user?.email || "")}
+                storeName={settings.storeName || state.partner?.companyName || "Shea POS"}
+                intro={t("homeLauncherIntro")}
+                groups={navGroups.map((group) => ({
+                  ...group,
+                  items: group.items.map((item) => ({
+                    ...item,
+                    badge: item.id === "orders" && unreadOnlineCount > 0 ? `${unreadOnlineCount} ${t("unread")}` : item.badge,
+                  })),
+                }))}
+                onNavigate={(target) => openPage(target)}
+              />
+            )}
             {page === "pos" && (
-              <PosScreen onNotice={setNotice} onChanged={refreshState} />
+              <PosScreen
+                onNotice={setNotice}
+                onChanged={refreshState}
+                canManageRegister={can("REGISTER_MANAGE")}
+              />
             )}
             {page === "stock" && <InventoryScreen onNotice={setNotice} />}
             {page === "barcodes" && <BarcodeManagerScreen onNotice={setNotice} onChanged={refreshState} gatewayMode={settings.deploymentMode === "multi"} />}
@@ -796,7 +902,7 @@ export default function App() {
             {page === "gifts" && <GiftStoreScreen capabilities={state.capabilities} canManage={can("CUSTOM_ORDERS_MANAGE")} syncVersion={state.lastSyncAt} />}
             {page === "orders" && <OrdersScreen openOrderId={openOrderId} onOpenedOrder={() => setOpenOrderId(null)} onUnreadOrdersChanged={setUnreadOnlineCount} />}
             {page === "sales" && (
-              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} onGoToPos={() => setPage("pos")} />
+              <InvoicesScreen onNotice={setNotice} settings={settings} canCorrect={can("REGISTER_MANAGE") && settings.deploymentMode !== "multi"} canRefund={can("SALES_REFUND")} onGoToPos={() => navigateTo("pos")} />
             )}
             {page === "reports" && <ReportsScreen onNotice={setNotice} canViewTeam={can("USERS_MANAGE")} />}
             {page === "requests" && (
@@ -808,6 +914,7 @@ export default function App() {
                 values={settings}
                 onChange={setSettings}
                 onNotice={setNotice}
+                onSignOut={logout}
               />
             )}
           </section>
@@ -834,17 +941,20 @@ export default function App() {
           <div className="operator-switch-layer">
             <LocalAccessScreen
               setupRequired={false}
+              remembered={state.localAccess.remembered}
               canGoBack
               onBack={() => setSwitchingOperator(false)}
               onLock={async () => {
                 await window.pos.localLogout();
+                initialLandingApplied.current = false;
                 setSwitchingOperator(false);
                 await refreshState();
               }}
               onSuccess={(value) => {
                 const next = value as AppState;
+                initialLandingApplied.current = true;
                 setState(next);
-                setPage(firstAllowedPage(next.localAccess.permissions));
+                setPage(landingPageFor(next.localAccess.user, next.localAccess.permissions));
                 setSwitchingOperator(false);
               }}
             />
@@ -897,8 +1007,19 @@ export default function App() {
                     { label: t("focusSearch"), keys: ["F2"] },
                     { label: t("refresh"), keys: ["F5"] },
                     ...(page === "pos" && can("POS_SELL")
-                      ? [{ label: t("holdSale"), keys: ["F3"] }]
-                      : []),
+                      ? [
+                        { label: t("nextPage"), keys: ["Ctrl/⌘", "→"] },
+                        { label: t("previousPage"), keys: ["Ctrl/⌘", "←"] },
+                        { label: t("backToApplications"), keys: ["Esc"] },
+                        { label: t("newSaleAction"), keys: ["Esc", t("afterSaleComplete")] },
+                        { label: t("holdSale"), keys: ["F3"] },
+                        { label: t("amountTendered"), keys: ["F6"] },
+                        { label: t("completeSale"), keys: ["F10"] },
+                        { label: t("printReceipt"), keys: ["F9"] },
+                      ]
+                      : page !== "home"
+                        ? [{ label: t("home"), keys: ["Esc"] }]
+                        : []),
                     ...(can("SYNC_MANAGE")
                       ? [{ label: t("sync"), keys: ["Ctrl", "Shift", "S"] }]
                       : []),
@@ -908,12 +1029,6 @@ export default function App() {
                     {
                       label: t("switchOperator"),
                       keys: ["Ctrl", "Shift", "L"],
-                    },
-                    {
-                      label: sidebarCollapsed
-                        ? t("expandSidebar")
-                        : t("collapseSidebar"),
-                      keys: ["Ctrl", "B"],
                     },
                     { label: t("keyboardShortcuts"), keys: ["F1"] },
                   ]}

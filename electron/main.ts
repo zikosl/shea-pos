@@ -18,6 +18,10 @@ let database: PosDatabase | null = null;
 let syncTimer: NodeJS.Timeout | null = null;
 let onlineOrderPollTimer: NodeJS.Timeout | null = null;
 let backupTimer: NodeJS.Timeout | null = null;
+let cashSessionAutoCloseTimer: NodeJS.Timeout | null = null;
+let cashSessionAutoCloseRunning = false;
+let cashSessionAutoCloseRetryAt = 0;
+let pendingCashSessionAutoClosed = false;
 let updater: PosUpdater | null = null;
 let orderRealtime: OrderRealtimeService | null = null;
 const pendingRealtimeOrderIds = new Set<number>();
@@ -26,6 +30,10 @@ function flushRealtimeOrderEvents() {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
   for (const id of pendingRealtimeOrderIds) mainWindow.webContents.send("pos:realtime-order", id);
   pendingRealtimeOrderIds.clear();
+  if (pendingCashSessionAutoClosed) {
+    mainWindow.webContents.send("pos:cash-session-auto-closed");
+    pendingCashSessionAutoClosed = false;
+  }
 }
 
 function startupLog(message: string, error?: unknown) {
@@ -150,6 +158,49 @@ async function runAutomaticBackup(database: PosDatabase) {
   for (const expired of backups.slice(14)) rmSync(path.join(root, expired), { recursive: true, force: true });
 }
 
+async function runScheduledCashSessionClose(
+  database: PosDatabase,
+  access: LocalAccessService,
+  sync: SyncService,
+) {
+  if (cashSessionAutoCloseRunning || Date.now() < cashSessionAutoCloseRetryAt) return;
+  const settings = database.getSettings();
+  if (settings.cashSessionAutoCloseEnabled !== "true") return;
+  const [hour, minute] = (settings.cashSessionAutoCloseTime || "20:00").split(":").map(Number);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return;
+
+  const now = new Date();
+  const scheduledAt = new Date(now);
+  scheduledAt.setHours(hour, minute, 0, 0);
+  if (now < scheduledAt) return;
+
+  cashSessionAutoCloseRunning = true;
+  try {
+    const session = database.getCashSession() as any;
+    if (!session) return;
+    const openedAt = new Date(session.opened_at);
+    if (Number.isNaN(openedAt.getTime()) || openedAt > scheduledAt) return;
+
+    const closed = database.closeCashSession({ note: "SYSTEM_AUTO_CLOSE_NO_PHYSICAL_COUNT" }) as any;
+    pendingCashSessionAutoClosed = true;
+    try {
+      access.audit("CASH_SESSION_AUTO_CLOSED", "CashSession", closed.local_id, {
+        scheduledTime: settings.cashSessionAutoCloseTime || "20:00",
+        countedCash: null,
+      });
+    } catch (error) {
+      startupLog("Could not write scheduled cash-session audit entry", error);
+    }
+    flushRealtimeOrderEvents();
+    if (sync.state().authenticated) void sync.sync().catch((error) => startupLog("Scheduled cash-session close sync failed", error));
+  } catch (error) {
+    cashSessionAutoCloseRetryAt = Date.now() + 60_000;
+    startupLog("Scheduled cash-session close failed; it will retry", error);
+  } finally {
+    cashSessionAutoCloseRunning = false;
+  }
+}
+
 app.setAppUserModelId("com.openzey.shea.pos");
 protocol.registerSchemesAsPrivileged([
   { scheme: "shea-asset", privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -231,12 +282,17 @@ else {
     )
       database.setSetting("boundPartnerUserId", String(existingState.user.id));
     const access = new LocalAccessService(database);
+    access.restoreRememberedSession();
     const window = createWindow();
     updater = new PosUpdater(window);
     registerIpc(database!, sync, access, assets, window, updater, gateway, (active) => {
       if (active) orderRealtime?.start();
       else orderRealtime?.stop();
     });
+    void runScheduledCashSessionClose(database, access, sync);
+    cashSessionAutoCloseTimer = setInterval(() => {
+      if (database) void runScheduledCashSessionClose(database, access, sync);
+    }, 15_000);
     if (existingState.authenticated) orderRealtime.start();
     updater.start();
     syncTimer = setInterval(() => {
@@ -273,6 +329,7 @@ app.on("before-quit", () => {
   if (syncTimer) clearInterval(syncTimer);
   if (onlineOrderPollTimer) clearInterval(onlineOrderPollTimer);
   if (backupTimer) clearInterval(backupTimer);
+  if (cashSessionAutoCloseTimer) clearInterval(cashSessionAutoCloseTimer);
   updater?.stop();
   orderRealtime?.stop();
   database?.close();

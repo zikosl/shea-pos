@@ -382,9 +382,11 @@ export function ReportsScreen({
                     localeFor(language),
                   )}{" "}
                   · {localizeValue(language, row.status)}
-                  {row.difference != null
-                    ? ` · ${t("difference")} ${money(row.difference)}`
-                    : ""}
+                  {row.note === "SYSTEM_AUTO_CLOSE_NO_PHYSICAL_COUNT"
+                    ? ` · ${t("autoClosedNoCount")}`
+                    : row.difference != null
+                      ? ` · ${t("difference")} ${money(row.difference)}`
+                      : ""}
                 </span>
               ))}
             </div>

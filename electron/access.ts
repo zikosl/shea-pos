@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { safeStorage } from "electron";
 import type { PosDatabase } from "./database";
 
 export const permissions = [
@@ -63,6 +64,46 @@ export class LocalAccessService {
   private currentUserId: string | null = null;
   private lastActivityAt = 0;
 
+  private clearRememberedSession() {
+    this.database.deleteSetting("rememberedLocalSession");
+    this.database.deleteSetting("rememberedLocalSessionHash");
+  }
+
+  private hasRememberedSession() {
+    return Boolean(
+      this.database.getSetting("rememberedLocalSession") &&
+      this.database.getSetting("rememberedLocalSessionHash"),
+    );
+  }
+
+  restoreRememberedSession() {
+    const encrypted = this.database.getSetting("rememberedLocalSession");
+    const expectedHash = this.database.getSetting("rememberedLocalSessionHash");
+    if (!encrypted || !expectedHash || !safeStorage.isEncryptionAvailable()) return false;
+    try {
+      const saved = JSON.parse(safeStorage.decryptString(Buffer.from(encrypted, "base64"))) as {
+        userId?: string;
+        token?: string;
+      };
+      const hash = saved.token ? createHash("sha256").update(saved.token).digest("hex") : "";
+      if (!saved.userId || !hash || !timingSafeEqual(Buffer.from(hash), Buffer.from(expectedHash))) {
+        this.clearRememberedSession();
+        return false;
+      }
+      const row = this.database.db.prepare("SELECT id FROM local_users WHERE id=? AND active=1").get(saved.userId) as { id: string } | undefined;
+      if (!row) {
+        this.clearRememberedSession();
+        return false;
+      }
+      this.currentUserId = row.id;
+      this.lastActivityAt = Date.now();
+      return true;
+    } catch {
+      this.clearRememberedSession();
+      return false;
+    }
+  }
+
   constructor(private readonly database: PosDatabase) {}
 
   private rowToUser(row: any): SafeUser {
@@ -96,6 +137,7 @@ export class LocalAccessService {
     return {
       setupRequired: count === 0,
       authenticated: Boolean(row),
+      remembered: this.hasRememberedSession(),
       user: row ? this.rowToUser(row) : null,
       permissions: row ? this.rowToUser(row).permissions : [],
     };
@@ -116,7 +158,7 @@ export class LocalAccessService {
     return this.state();
   }
 
-  login(username: string, secret: string) {
+  login(username: string, secret: string, rememberSession = false) {
     const row = this.database.db.prepare("SELECT * FROM local_users WHERE username=?").get(normalizeUsername(username)) as any;
     const now = Date.now();
     if (!row || !row.active) throw new Error("Invalid local credentials");
@@ -129,6 +171,16 @@ export class LocalAccessService {
         .run(attempts >= 5 ? 0 : attempts, lockedUntil, row.id);
       throw new Error(lockedUntil ? "Account locked for 5 minutes" : "Invalid local credentials");
     }
+    if (rememberSession) {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("SECURE_STORAGE_UNAVAILABLE");
+    }
+    this.clearRememberedSession();
+    if (rememberSession) {
+      const token = randomBytes(32).toString("base64url");
+      const encrypted = safeStorage.encryptString(JSON.stringify({ userId: row.id, token }));
+      this.database.setSetting("rememberedLocalSession", encrypted.toString("base64"));
+      this.database.setSetting("rememberedLocalSessionHash", createHash("sha256").update(token).digest("hex"));
+    }
     this.currentUserId = row.id;
     this.lastActivityAt = now;
     this.database.db.prepare("UPDATE local_users SET failed_attempts=0,locked_until=NULL,last_login_at=?,updated_at=? WHERE id=?")
@@ -140,6 +192,7 @@ export class LocalAccessService {
   logout() {
     if (this.currentUserId) this.audit("LOCAL_LOGOUT", "LocalUser", this.currentUserId);
     this.currentUserId = null;
+    this.clearRememberedSession();
   }
 
   touch() {

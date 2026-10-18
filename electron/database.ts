@@ -1881,24 +1881,24 @@ export class PosDatabase {
     return this.getCashSession();
   }
 
-  closeCashSession(input: { countedCash: number; note?: string }) {
+  closeCashSession(input: { countedCash?: number; note?: string }) {
     const session = this.getCashSession() as any;
     if (!session) throw new Error("Open the register before closing it");
-    const difference = input.countedCash - session.expected_cash;
+    const difference = input.countedCash == null ? null : input.countedCash - session.expected_cash;
     this.db.transaction(() => {
       this.db
         .prepare(
           "UPDATE cash_sessions SET status='CLOSED',counted_cash=?,difference=?,note=COALESCE(?,note),sync_state='PENDING',closed_at=CURRENT_TIMESTAMP WHERE local_id=?",
         )
         .run(
-          input.countedCash,
+          input.countedCash ?? null,
           difference,
           input.note ?? null,
           session.local_id,
         );
       this.enqueue("CLOSE_CASH_SESSION", "CashSession", session.local_id, {
         localId: session.local_id,
-        countedCash: input.countedCash,
+        countedCash: input.countedCash ?? null,
         note: input.note,
       });
     })();
@@ -1942,6 +1942,8 @@ export class PosDatabase {
   checkout(input: CheckoutInput) {
     if (!input.lines.length) throw new Error("Add at least one product");
     if (input.paymentMethod !== "CASH") throw new Error("CASH_ONLY_CHECKOUT");
+    if (new Set(input.lines.map((line) => line.productLocalId)).size !== input.lines.length)
+      throw new Error("DUPLICATE_PRODUCT_LINE");
     if (!this.getCashSession())
       throw new Error("Open the register before accepting cash");
     return this.db.transaction(() => {

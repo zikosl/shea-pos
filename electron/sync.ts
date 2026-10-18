@@ -134,7 +134,11 @@ export class SyncService {
       } catch {
         // A renderer notification must not turn a successful sync into a failure.
       }
-      this.database.setSetting("lastSyncError", pushErrors[0] ?? "");
+      const pendingOutbox = this.database.listOutbox() as Array<{
+        last_error?: string | null;
+      }>;
+      const pendingError = pendingOutbox.find((row) => row.last_error)?.last_error;
+      this.database.setSetting("lastSyncError", pushErrors[0] ?? pendingError ?? "");
       return this.state();
     } catch (error) {
       this.database.setSetting(
@@ -281,14 +285,16 @@ export class SyncService {
           const cash = this.database.getCashSessionByLocalId(row.aggregate_id);
           if (!cash?.server_id)
             throw new Error("Register opening must synchronize first");
+          const hasPhysicalCount = payload.countedCash != null;
+          const closeMutation = hasPhysicalCount
+            ? `mutation ClosePosRegister($id: String!, $countedCash: Float!, $note: String) { closeCashSession(id: $id, countedCash: $countedCash, note: $note) { id } }`
+            : `mutation ClosePosRegister($id: String!, $note: String) { closeCashSession(id: $id, note: $note) { id } }`;
           await graphqlRequest(
             session.endpoint,
-            `mutation ClosePosRegister($id: String!, $countedCash: Float!, $note: String) { closeCashSession(id: $id, countedCash: $countedCash, note: $note) { id } }`,
-            {
-              id: cash.server_id,
-              countedCash: payload.countedCash,
-              note: payload.note,
-            },
+            closeMutation,
+            hasPhysicalCount
+              ? { id: cash.server_id, countedCash: payload.countedCash, note: payload.note }
+              : { id: cash.server_id, note: payload.note },
             session.accessToken,
           );
           this.database.markCashSessionClosed(row.aggregate_id);
